@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// HTTP client. See RFC 2616.
+// HTTP client. See RFC 7230 through 7235.
 //
 // This is the high-level Client interface.
 // The low-level implementation is in transport.go.
@@ -95,14 +95,12 @@ type Client struct {
 	// A Timeout of zero means no timeout.
 	//
 	// The Client cancels requests to the underlying Transport
-	// using the Request.Cancel mechanism. Requests passed
-	// to Client.Do may still set Request.Cancel; both will
-	// cancel the request.
+	// as if the Request's Context ended.
 	//
 	// For compatibility, the Client will also use the deprecated
 	// CancelRequest method on Transport if found. New
-	// RoundTripper implementations should use Request.Cancel
-	// instead of implementing CancelRequest.
+	// RoundTripper implementations should use the Request's Context
+	// for cancelation instead of implementing CancelRequest.
 	Timeout time.Duration
 }
 
@@ -127,7 +125,10 @@ type RoundTripper interface {
 	// authentication, or cookies.
 	//
 	// RoundTrip should not modify the request, except for
-	// consuming and closing the Request's Body.
+	// consuming and closing the Request's Body. RoundTrip may
+	// read fields of the request in a separate goroutine. Callers
+	// should not mutate or reuse the request until the Response's
+	// Body has been closed.
 	//
 	// RoundTrip must always close the body, including on errors,
 	// but depending on the implementation may do so in a separate
@@ -332,7 +333,7 @@ func setRequestCancel(req *Request, rt RoundTripper, deadline time.Time) (stopTi
 	return stopTimer, timedOut.isSet
 }
 
-// See 2 (end of page 4) http://www.ietf.org/rfc/rfc2617.txt
+// See 2 (end of page 4) https://www.ietf.org/rfc/rfc2617.txt
 // "To receive authorization, the client sends the userid and password,
 // separated by a single colon (":") character, within a base64
 // encoded string in the credentials."
@@ -354,7 +355,9 @@ func basicAuth(username, password string) string {
 //
 // An error is returned if there were too many redirects or if there
 // was an HTTP protocol error. A non-2xx response doesn't cause an
-// error.
+// error. Any returned error will be of type *url.Error. The url.Error
+// value's Timeout method will report true if request timed out or was
+// canceled.
 //
 // When err is nil, resp always contains a non-nil resp.Body.
 // Caller should close resp.Body when done reading from it.
@@ -379,7 +382,9 @@ func Get(url string) (resp *Response, err error) {
 //
 // An error is returned if the Client's CheckRedirect function fails
 // or if there was an HTTP protocol error. A non-2xx response doesn't
-// cause an error.
+// cause an error. Any returned error will be of type *url.Error. The
+// url.Error value's Timeout method will report true if request timed
+// out or was canceled.
 //
 // When err is nil, resp always contains a non-nil resp.Body.
 // Caller should close resp.Body when done reading from it.
@@ -454,6 +459,15 @@ func redirectBehavior(reqMethod string, resp *Response, ireq *Request) (redirect
 	return redirectMethod, shouldRedirect, includeBody
 }
 
+// urlErrorOp returns the (*url.Error).Op value to use for the
+// provided (*Request).Method value.
+func urlErrorOp(method string) string {
+	if method == "" {
+		return "Get"
+	}
+	return method[:1] + strings.ToLower(method[1:])
+}
+
 // Do sends an HTTP request and returns an HTTP response, following
 // policy (such as redirects, cookies, auth) as configured on the
 // client.
@@ -487,10 +501,26 @@ func redirectBehavior(reqMethod string, resp *Response, ireq *Request) (redirect
 // provided that the Request.GetBody function is defined.
 // The NewRequest function automatically sets GetBody for common
 // standard library body types.
+//
+// Any returned error will be of type *url.Error. The url.Error
+// value's Timeout method will report true if request timed out or was
+// canceled.
 func (c *Client) Do(req *Request) (*Response, error) {
+	return c.do(req)
+}
+
+var testHookClientDoResult func(retres *Response, reterr error)
+
+func (c *Client) do(req *Request) (retres *Response, reterr error) {
+	if testHookClientDoResult != nil {
+		defer func() { testHookClientDoResult(retres, reterr) }()
+	}
 	if req.URL == nil {
 		req.closeBody()
-		return nil, errors.New("http: nil Request.URL")
+		return nil, &url.Error{
+			Op:  urlErrorOp(req.Method),
+			Err: errors.New("http: nil Request.URL"),
+		}
 	}
 
 	var (
@@ -509,15 +539,14 @@ func (c *Client) Do(req *Request) (*Response, error) {
 		if !reqBodyClosed {
 			req.closeBody()
 		}
-		method := valueOrDefault(reqs[0].Method, "GET")
 		var urlStr string
 		if resp != nil && resp.Request != nil {
-			urlStr = resp.Request.URL.String()
+			urlStr = stripPassword(resp.Request.URL)
 		} else {
-			urlStr = req.URL.String()
+			urlStr = stripPassword(req.URL)
 		}
 		return &url.Error{
-			Op:  method[:1] + strings.ToLower(method[1:]),
+			Op:  urlErrorOp(reqs[0].Method),
 			URL: urlStr,
 			Err: err,
 		}
@@ -536,12 +565,22 @@ func (c *Client) Do(req *Request) (*Response, error) {
 				resp.closeBody()
 				return nil, uerr(fmt.Errorf("failed to parse Location header %q: %v", loc, err))
 			}
+			host := ""
+			if req.Host != "" && req.Host != req.URL.Host {
+				// If the caller specified a custom Host header and the
+				// redirect location is relative, preserve the Host header
+				// through the redirect. See issue #22233.
+				if u, _ := url.Parse(loc); u != nil && !u.IsAbs() {
+					host = req.Host
+				}
+			}
 			ireq := reqs[0]
 			req = &Request{
 				Method:   redirectMethod,
 				Response: resp,
 				URL:      u,
 				Header:   make(Header),
+				Host:     host,
 				Cancel:   ireq.Cancel,
 				ctx:      ireq.ctx,
 			}
@@ -604,6 +643,7 @@ func (c *Client) Do(req *Request) (*Response, error) {
 			reqBodyClosed = true
 			if !deadline.IsZero() && didTimeout() {
 				err = &httpError{
+					// TODO: early in cycle: s/Client.Timeout exceeded/timeout or context cancelation/
 					err:     err.Error() + " (Client.Timeout exceeded while awaiting headers)",
 					timeout: true,
 				}
@@ -705,7 +745,7 @@ func defaultCheckRedirect(req *Request, via []*Request) error {
 //
 // See the Client.Do method documentation for details on how redirects
 // are handled.
-func Post(url string, contentType string, body io.Reader) (resp *Response, err error) {
+func Post(url, contentType string, body io.Reader) (resp *Response, err error) {
 	return DefaultClient.Post(url, contentType, body)
 }
 
@@ -720,7 +760,7 @@ func Post(url string, contentType string, body io.Reader) (resp *Response, err e
 //
 // See the Client.Do method documentation for details on how redirects
 // are handled.
-func (c *Client) Post(url string, contentType string, body io.Reader) (resp *Response, err error) {
+func (c *Client) Post(url, contentType string, body io.Reader) (resp *Response, err error) {
 	req, err := NewRequest("POST", url, body)
 	if err != nil {
 		return nil, err
@@ -750,7 +790,7 @@ func PostForm(url string, data url.Values) (resp *Response, err error) {
 // with data's keys and values URL-encoded as the request body.
 //
 // The Content-Type header is set to application/x-www-form-urlencoded.
-// To set other headers, use NewRequest and DefaultClient.Do.
+// To set other headers, use NewRequest and Client.Do.
 //
 // When err is nil, resp always contains a non-nil resp.Body.
 // Caller should close resp.Body when done reading from it.
@@ -814,6 +854,7 @@ func (b *cancelTimerBody) Read(p []byte) (n int, err error) {
 	}
 	if b.reqDidTimeout() {
 		err = &httpError{
+			// TODO: early in cycle: s/Client.Timeout exceeded/timeout or context cancelation/
 			err:     err.Error() + " (Client.Timeout exceeded while reading body)",
 			timeout: true,
 		}
@@ -843,16 +884,8 @@ func shouldCopyHeaderOnRedirect(headerKey string, initial, dest *url.URL) bool {
 		// directly, we don't know their scope, so we assume
 		// it's for *.domain.com.
 
-		// TODO(bradfitz): once issue 16142 is fixed, make
-		// this code use those URL accessors, and consider
-		// "http://foo.com" and "http://foo.com:80" as
-		// equivalent?
-
-		// TODO(bradfitz): better hostname canonicalization,
-		// at least once we figure out IDNA/Punycode (issue
-		// 13835).
-		ihost := strings.ToLower(initial.Host)
-		dhost := strings.ToLower(dest.Host)
+		ihost := canonicalAddr(initial)
+		dhost := canonicalAddr(dest)
 		return isDomainOrSubdomain(dhost, ihost)
 	}
 	// All other headers are copied:
@@ -874,4 +907,13 @@ func isDomainOrSubdomain(sub, parent string) bool {
 		return false
 	}
 	return sub[len(sub)-len(parent)-1] == '.'
+}
+
+func stripPassword(u *url.URL) string {
+	pass, passSet := u.User.Password()
+	if passSet {
+		return strings.Replace(u.String(), pass+"@", "***@", 1)
+	}
+
+	return u.String()
 }

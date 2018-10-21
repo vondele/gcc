@@ -1,5 +1,5 @@
 /* Chains of recurrences.
-   Copyright (C) 2003-2017 Free Software Foundation, Inc.
+   Copyright (C) 2003-2018 Free Software Foundation, Inc.
    Contributed by Sebastian Pop <pop@cri.ensmp.fr>
 
 This file is part of GCC.
@@ -40,53 +40,6 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree-scalar-evolution.h"
 
 /* Extended folder for chrecs.  */
-
-/* Determines whether CST is not a constant evolution.  */
-
-static inline bool
-is_not_constant_evolution (const_tree cst)
-{
-  return (TREE_CODE (cst) == POLYNOMIAL_CHREC);
-}
-
-/* Fold CODE for a polynomial function and a constant.  */
-
-static inline tree
-chrec_fold_poly_cst (enum tree_code code,
-		     tree type,
-		     tree poly,
-		     tree cst)
-{
-  gcc_assert (poly);
-  gcc_assert (cst);
-  gcc_assert (TREE_CODE (poly) == POLYNOMIAL_CHREC);
-  gcc_checking_assert (!is_not_constant_evolution (cst));
-  gcc_checking_assert (useless_type_conversion_p (type, chrec_type (poly)));
-
-  switch (code)
-    {
-    case PLUS_EXPR:
-      return build_polynomial_chrec
-	(CHREC_VARIABLE (poly),
-	 chrec_fold_plus (type, CHREC_LEFT (poly), cst),
-	 CHREC_RIGHT (poly));
-
-    case MINUS_EXPR:
-      return build_polynomial_chrec
-	(CHREC_VARIABLE (poly),
-	 chrec_fold_minus (type, CHREC_LEFT (poly), cst),
-	 CHREC_RIGHT (poly));
-
-    case MULT_EXPR:
-      return build_polynomial_chrec
-	(CHREC_VARIABLE (poly),
-	 chrec_fold_multiply (type, CHREC_LEFT (poly), cst),
-	 chrec_fold_multiply (type, CHREC_RIGHT (poly), cst));
-
-    default:
-      return chrec_dont_know;
-    }
-}
 
 /* Fold the addition of two polynomial functions.  */
 
@@ -295,8 +248,23 @@ chrec_fold_plus_1 (enum tree_code code, tree type,
 	  return chrec_fold_plus_poly_poly (code, type, op0, op1);
 
 	CASE_CONVERT:
-	  if (tree_contains_chrecs (op1, NULL))
-	    return chrec_dont_know;
+	  {
+	    /* We can strip sign-conversions to signed by performing the
+	       operation in unsigned.  */
+	    tree optype = TREE_TYPE (TREE_OPERAND (op1, 0));
+	    if (INTEGRAL_TYPE_P (type)
+		&& INTEGRAL_TYPE_P (optype)
+		&& tree_nop_conversion_p (type, optype)
+		&& TYPE_UNSIGNED (optype))
+	      return chrec_convert (type,
+				    chrec_fold_plus_1 (code, optype,
+						       chrec_convert (optype,
+								      op0, NULL),
+						       TREE_OPERAND (op1, 0)),
+				    NULL);
+	    if (tree_contains_chrecs (op1, NULL))
+	      return chrec_dont_know;
+	  }
 	  /* FALLTHRU */
 
 	default:
@@ -313,8 +281,23 @@ chrec_fold_plus_1 (enum tree_code code, tree type,
 	}
 
     CASE_CONVERT:
-      if (tree_contains_chrecs (op0, NULL))
-	return chrec_dont_know;
+      {
+	/* We can strip sign-conversions to signed by performing the
+	   operation in unsigned.  */
+	tree optype = TREE_TYPE (TREE_OPERAND (op0, 0));
+	if (INTEGRAL_TYPE_P (type)
+	    && INTEGRAL_TYPE_P (optype)
+	    && tree_nop_conversion_p (type, optype)
+	    && TYPE_UNSIGNED (optype))
+	  return chrec_convert (type,
+				chrec_fold_plus_1 (code, optype,
+						   TREE_OPERAND (op0, 0),
+						   chrec_convert (optype,
+								  op1, NULL)),
+				NULL);
+	if (tree_contains_chrecs (op0, NULL))
+	  return chrec_dont_know;
+      }
       /* FALLTHRU */
 
     default:
@@ -498,7 +481,7 @@ chrec_fold_multiply (tree type,
 static tree
 tree_fold_binomial (tree type, tree n, unsigned int k)
 {
-  bool overflow;
+  wi::overflow_type overflow;
   unsigned int i;
 
   /* Handle the most frequent cases.  */
@@ -872,8 +855,7 @@ reset_evolution_in_loop (unsigned loop_num,
 					   new_evol);
       tree right = reset_evolution_in_loop (loop_num, CHREC_RIGHT (chrec),
 					    new_evol);
-      return build3 (POLYNOMIAL_CHREC, TREE_TYPE (left),
-		     CHREC_VAR (chrec), left, right);
+      return build_polynomial_chrec (CHREC_VARIABLE (chrec), left, right);
     }
 
   while (TREE_CODE (chrec) == POLYNOMIAL_CHREC
@@ -962,6 +944,7 @@ chrec_contains_symbols (const_tree chrec)
 
   if (TREE_CODE (chrec) == SSA_NAME
       || VAR_P (chrec)
+      || TREE_CODE (chrec) == POLY_INT_CST
       || TREE_CODE (chrec) == PARM_DECL
       || TREE_CODE (chrec) == FUNCTION_DECL
       || TREE_CODE (chrec) == LABEL_DECL
@@ -1162,6 +1145,7 @@ evolution_function_is_univariate_p (const_tree chrec)
 	    return false;
 	  break;
 	}
+      return true;
 
     default:
       return true;
@@ -1610,6 +1594,9 @@ operator_is_linear (tree scev)
 bool
 scev_is_linear_expression (tree scev)
 {
+  if (evolution_function_is_constant_p (scev))
+    return true;
+
   if (scev == NULL
       || !operator_is_linear (scev))
     return false;

@@ -1,5 +1,5 @@
 /* Functions to support general ended bitmaps.
-   Copyright (C) 1997-2017 Free Software Foundation, Inc.
+   Copyright (C) 1997-2018 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -243,6 +243,7 @@ struct GTY(()) bitmap_head {
   bitmap_element * GTY((skip(""))) current; /* Last element looked at.  */
   bitmap_obstack *obstack;		/* Obstack to allocate elements from.
 					   If NULL, then use GGC allocation.  */
+  void dump ();
 };
 
 /* Global data */

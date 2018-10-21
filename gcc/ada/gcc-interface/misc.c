@@ -6,7 +6,7 @@
  *                                                                          *
  *                           C Implementation File                          *
  *                                                                          *
- *          Copyright (C) 1992-2017, Free Software Foundation, Inc.         *
+ *          Copyright (C) 1992-2018, Free Software Foundation, Inc.         *
  *                                                                          *
  * GNAT is free software;  you can  redistribute it  and/or modify it under *
  * terms of the  GNU General Public License as published  by the Free Soft- *
@@ -77,9 +77,6 @@ int optimize;
 #undef optimize_size
 int optimize_size;
 
-#undef flag_compare_debug
-int flag_compare_debug;
-
 #undef flag_short_enums
 int flag_short_enums;
 
@@ -138,8 +135,9 @@ gnat_option_lang_mask (void)
    are marked as Ada-specific.  Return true on success or false on failure.  */
 
 static bool
-gnat_handle_option (size_t scode, const char *arg, int value, int kind,
-		    location_t loc, const struct cl_option_handlers *handlers)
+gnat_handle_option (size_t scode, const char *arg, HOST_WIDE_INT value,
+		    int kind, location_t loc,
+		    const struct cl_option_handlers *handlers)
 {
   enum opt_code code = (enum opt_code) scode;
 
@@ -170,6 +168,7 @@ gnat_handle_option (size_t scode, const char *arg, int value, int kind,
 
     case OPT_fshort_enums:
     case OPT_fsigned_char:
+    case OPT_funsigned_char:
       /* These are handled by the middle-end.  */
       break;
 
@@ -262,6 +261,12 @@ gnat_post_options (const char **pfilename ATTRIBUTE_UNUSED)
   /* No psABI change warnings for Ada.  */
   warn_psabi = 0;
 
+  /* No return type warnings for Ada.  */
+  warn_return_type = 0;
+
+  /* No string overflow warnings for Ada.  */
+  warn_stringop_overflow = 0;
+
   /* No caret by default for Ada.  */
   if (!global_options_set.x_flag_diagnostics_show_caret)
     global_dc->show_caret = false;
@@ -276,7 +281,6 @@ gnat_post_options (const char **pfilename ATTRIBUTE_UNUSED)
   gnat_encodings = global_options.x_gnat_encodings;
   optimize = global_options.x_optimize;
   optimize_size = global_options.x_optimize_size;
-  flag_compare_debug = global_options.x_flag_compare_debug;
   flag_stack_check = global_options.x_flag_stack_check;
   flag_short_enums = global_options.x_flag_short_enums;
 
@@ -339,7 +343,6 @@ internal_error_function (diagnostic_context *context, const char *msgid,
   sp_loc.Bounds = &temp_loc;
   sp_loc.Array = loc;
 
-  Current_Error_Node = error_gnat_node;
   Compiler_Abort (sp, sp_loc, true);
 }
 
@@ -466,6 +469,7 @@ gnat_print_type (FILE *file, tree node, int indent)
   switch (TREE_CODE (node))
     {
     case FUNCTION_TYPE:
+    case METHOD_TYPE:
       print_node (file, "ci/co list", TYPE_CI_CO_LIST (node), indent + 4);
       break;
 
@@ -677,12 +681,12 @@ gnat_get_fixed_point_type_info (const_tree type,
 
 /* Return true if types T1 and T2 are identical for type hashing purposes.
    Called only after doing all language independent checks.  At present,
-   this function is only called when both types are FUNCTION_TYPE.  */
+   this is only called when both types are FUNCTION_TYPE or METHOD_TYPE.  */
 
 static bool
 gnat_type_hash_eq (const_tree t1, const_tree t2)
 {
-  gcc_assert (TREE_CODE (t1) == FUNCTION_TYPE);
+  gcc_assert (FUNC_OR_METHOD_TYPE_P (t1) && TREE_CODE (t1) == TREE_CODE (t2));
   return fntype_same_flags_p (t1, TYPE_CI_CO_LIST (t2),
 			      TYPE_RETURN_UNCONSTRAINED_P (t2),
 			      TYPE_RETURN_BY_DIRECT_REF_P (t2),
@@ -730,25 +734,25 @@ gnat_type_max_size (const_tree gnu_type)
   /* First see what we can get from TYPE_SIZE_UNIT, which might not
      be constant even for simple expressions if it has already been
      elaborated and possibly replaced by a VAR_DECL.  */
-  tree max_unitsize = max_size (TYPE_SIZE_UNIT (gnu_type), true);
+  tree max_size_unit = max_size (TYPE_SIZE_UNIT (gnu_type), true);
 
   /* If we don't have a constant, try to look at attributes which should have
      stayed untouched.  */
-  if (!tree_fits_uhwi_p (max_unitsize))
+  if (!tree_fits_uhwi_p (max_size_unit))
     {
       /* For record types, see what we can get from TYPE_ADA_SIZE.  */
       if (RECORD_OR_UNION_TYPE_P (gnu_type)
 	  && !TYPE_FAT_POINTER_P (gnu_type)
 	  && TYPE_ADA_SIZE (gnu_type))
 	{
-	  tree max_adasize = max_size (TYPE_ADA_SIZE (gnu_type), true);
+	  tree max_ada_size = max_size (TYPE_ADA_SIZE (gnu_type), true);
 
 	  /* If we have succeeded in finding a constant, round it up to the
 	     type's alignment and return the result in units.  */
-	  if (tree_fits_uhwi_p (max_adasize))
-	    max_unitsize
+	  if (tree_fits_uhwi_p (max_ada_size))
+	    max_size_unit
 	      = size_binop (CEIL_DIV_EXPR,
-			    round_up (max_adasize, TYPE_ALIGN (gnu_type)),
+			    round_up (max_ada_size, TYPE_ALIGN (gnu_type)),
 			    bitsize_unit_node);
 	}
 
@@ -778,7 +782,7 @@ gnat_type_max_size (const_tree gnu_type)
 		    = fold_build2 (PLUS_EXPR, ctype,
 				   fold_build2 (MINUS_EXPR, ctype, hb, lb),
 				   build_int_cst (ctype, 1));
-		  max_unitsize
+		  max_size_unit
 		    = fold_build2 (MULT_EXPR, sizetype,
 				   fold_convert (sizetype, length),
 				   TYPE_SIZE_UNIT (TREE_TYPE (gnu_type)));
@@ -787,7 +791,7 @@ gnat_type_max_size (const_tree gnu_type)
 	}
     }
 
-  return max_unitsize;
+  return max_size_unit;
 }
 
 static tree get_array_bit_stride (tree);
@@ -950,7 +954,7 @@ gnat_get_array_descr_info (const_tree const_type,
      structure.  */
   for (i = (convention_fortran_p ? info->ndimensions - 1 : 0),
        dimen = first_dimen;
-       0 <= i && i < info->ndimensions;
+       IN_RANGE (i, 0, info->ndimensions - 1);
        i += (convention_fortran_p ? -1 : 1),
        dimen = TREE_TYPE (dimen))
     {
@@ -1141,16 +1145,16 @@ default_pass_by_ref (tree gnu_type)
      is an In Out parameter, but it's probably best to err on the side of
      passing more things by reference.  */
 
+  if (AGGREGATE_TYPE_P (gnu_type)
+      && (!valid_constant_size_p (TYPE_SIZE_UNIT (gnu_type))
+	  || compare_tree_int (TYPE_SIZE_UNIT (gnu_type),
+			       TYPE_ALIGN (gnu_type)) > 0))
+    return true;
+
   if (pass_by_reference (NULL, TYPE_MODE (gnu_type), gnu_type, true))
     return true;
 
   if (targetm.calls.return_in_memory (gnu_type, NULL_TREE))
-    return true;
-
-  if (AGGREGATE_TYPE_P (gnu_type)
-      && (!valid_constant_size_p (TYPE_SIZE_UNIT (gnu_type))
-	  || 0 < compare_tree_int (TYPE_SIZE_UNIT (gnu_type),
-				   TYPE_ALIGN (gnu_type))))
     return true;
 
   return false;
@@ -1298,11 +1302,14 @@ enumerate_modes (void (*f) (const char *, int, int, int, int, int, int, int))
 	  }
 
       /* If no predefined C types were found, register the mode itself.  */
-      if (!skip_p)
+      int nunits, precision, bitsize;
+      if (!skip_p
+	  && GET_MODE_NUNITS (i).is_constant (&nunits)
+	  && GET_MODE_PRECISION (i).is_constant (&precision)
+	  && GET_MODE_BITSIZE (i).is_constant (&bitsize))
 	f (GET_MODE_NAME (i), digs, complex_p,
-	   vector_p ? GET_MODE_NUNITS (i) : 0, float_rep,
-	   GET_MODE_PRECISION (i), GET_MODE_BITSIZE (i),
-	   GET_MODE_ALIGNMENT (i));
+	   vector_p ? nunits : 0, float_rep,
+	   precision, bitsize, GET_MODE_ALIGNMENT (i));
     }
 }
 
@@ -1370,6 +1377,23 @@ gnat_init_ts (void)
   MARK_TS_TYPED (EXIT_STMT);
 }
 
+/* Return the size of a tree with CODE, which is a language-specific tree code
+   in category tcc_constant, tcc_exceptional or tcc_type.  The default expects
+   never to be called.  */
+
+static size_t
+gnat_tree_size (enum tree_code code)
+{
+  gcc_checking_assert (code >= NUM_TREE_CODES);
+  switch (code)
+    {
+    case UNCONSTRAINED_ARRAY_TYPE:
+      return sizeof (tree_type_non_common);
+    default:
+      gcc_unreachable ();
+    }
+}
+
 /* Return the lang specific structure attached to NODE.  Allocate it (cleared)
    if needed.  */
 
@@ -1387,6 +1411,8 @@ get_lang_specific (tree node)
 #define LANG_HOOKS_NAME			"GNU Ada"
 #undef  LANG_HOOKS_IDENTIFIER_SIZE
 #define LANG_HOOKS_IDENTIFIER_SIZE	sizeof (struct tree_identifier)
+#undef  LANG_HOOKS_TREE_SIZE
+#define LANG_HOOKS_TREE_SIZE		gnat_tree_size
 #undef  LANG_HOOKS_INIT
 #define LANG_HOOKS_INIT			gnat_init
 #undef  LANG_HOOKS_OPTION_LANG_MASK

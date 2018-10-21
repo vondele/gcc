@@ -1,5 +1,5 @@
 /* Loop optimizations over tree-ssa.
-   Copyright (C) 2003-2017 Free Software Foundation, Inc.
+   Copyright (C) 2003-2018 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -610,16 +610,6 @@ for_each_index (tree *addr_p, bool (*cbck) (tree, tree *, void *), void *data)
 	    return false;
 	  break;
 
-	case VAR_DECL:
-	case PARM_DECL:
-	case CONST_DECL:
-	case STRING_CST:
-	case RESULT_DECL:
-	case VECTOR_CST:
-	case COMPLEX_CST:
-	case INTEGER_CST:
-	case REAL_CST:
-	case FIXED_CST:
 	case CONSTRUCTOR:
 	  return true;
 
@@ -643,6 +633,9 @@ for_each_index (tree *addr_p, bool (*cbck) (tree, tree *, void *), void *data)
 	  return true;
 
 	default:
+	  if (DECL_P (*addr_p)
+	      || CONSTANT_CLASS_P (*addr_p))
+	    return true;
     	  gcc_unreachable ();
 	}
     }

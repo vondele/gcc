@@ -1,5 +1,5 @@
 /* Processing rules for constraints.
-   Copyright (C) 2013-2017 Free Software Foundation, Inc.
+   Copyright (C) 2013-2018 Free Software Foundation, Inc.
    Contributed by Andrew Sutton (andrew.n.sutton@gmail.com)
 
 This file is part of GCC.
@@ -804,7 +804,7 @@ check_for_logical_overloads (tree t)
 
   if (DECL_OVERLOADED_OPERATOR_P (fn))
     {
-      location_t loc = EXPR_LOC_OR_LOC (t, input_location);
+      location_t loc = cp_expr_loc_or_loc (t, input_location);
       error_at (loc, "constraint %qE, uses overloaded operator", t);
       return true;
     }
@@ -1257,6 +1257,9 @@ finish_shorthand_constraint (tree decl, tree constr)
 {
   /* No requirements means no constraints.  */
   if (!constr)
+    return NULL_TREE;
+
+  if (error_operand_p (constr))
     return NULL_TREE;
 
   tree proto = CONSTRAINED_PARM_PROTOTYPE (constr);
@@ -1918,7 +1921,7 @@ tsubst_constraint_info (tree t, tree args,
 tree
 tsubst_constraint (tree t, tree args, tsubst_flags_t complain, tree in_decl)
 {
-  if (t == NULL_TREE)
+  if (t == NULL_TREE || t == error_mark_node)
     return t;
   switch (TREE_CODE (t))
   {
@@ -2012,7 +2015,7 @@ satisfy_predicate_constraint (tree t, tree args,
   tree type = cv_unqualified (TREE_TYPE (expr));
   if (!same_type_p (type, boolean_type_node))
     {
-      error_at (EXPR_LOC_OR_LOC (expr, input_location),
+      error_at (cp_expr_loc_or_loc (expr, input_location),
                 "constraint %qE does not have type %qT",
                 expr, boolean_type_node);
       return boolean_false_node;
@@ -2504,7 +2507,12 @@ check_function_concept (tree fn)
     {
       location_t loc = DECL_SOURCE_LOCATION (fn);
       if (TREE_CODE (body) == STATEMENT_LIST && !STATEMENT_LIST_HEAD (body))
-        error_at (loc, "definition of concept %qD is empty", fn);
+	{
+	  if (seen_error ())
+	    /* The definition was probably erroneous, not empty.  */;
+	  else
+	    error_at (loc, "definition of concept %qD is empty", fn);
+	}
       else
         error_at (loc, "definition of concept %qD has multiple statements", fn);
     }

@@ -1,5 +1,5 @@
 /* String length optimization
-   Copyright (C) 2011-2017 Free Software Foundation, Inc.
+   Copyright (C) 2011-2018 Free Software Foundation, Inc.
    Contributed by Jakub Jelinek <jakub@redhat.com>
 
 This file is part of GCC.
@@ -30,6 +30,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "ssa.h"
 #include "cgraph.h"
 #include "gimple-pretty-print.h"
+#include "gimple-ssa-warn-restrict.h"
 #include "fold-const.h"
 #include "stor-layout.h"
 #include "gimple-fold.h"
@@ -38,14 +39,22 @@ along with GCC; see the file COPYING3.  If not see
 #include "gimple-iterator.h"
 #include "gimplify-me.h"
 #include "expr.h"
+#include "tree-cfg.h"
 #include "tree-dfa.h"
 #include "domwalk.h"
+#include "tree-ssa-alias.h"
 #include "tree-ssa-propagate.h"
+#include "tree-ssa-strlen.h"
 #include "params.h"
-#include "ipa-chkp.h"
 #include "tree-hash-traits.h"
+#include "tree-object-size.h"
 #include "builtins.h"
 #include "target.h"
+#include "diagnostic-core.h"
+#include "diagnostic.h"
+#include "intl.h"
+#include "attribs.h"
+#include "calls.h"
 
 /* A vector indexed by SSA_NAME_VERSION.  0 means unknown, positive value
    is an index into strinfo vector, negative value stands for
@@ -147,6 +156,12 @@ struct decl_stridxlist_map
    mappings.  */
 static hash_map<tree_decl_hash, stridxlist> *decl_to_stridxlist_htab;
 
+/* Hash table mapping strlen calls to stridx instances describing
+   the calls' arguments.  Non-null only when warn_stringop_truncation
+   is non-zero.  */
+typedef std::pair<int, location_t> stridx_strlenloc;
+static hash_map<tree, stridx_strlenloc> *strlen_to_stridx;
+
 /* Obstack for struct stridxlist and struct decl_stridxlist_map.  */
 static struct obstack stridx_obstack;
 
@@ -161,6 +176,7 @@ struct laststmt_struct
 } laststmt;
 
 static int get_stridx_plus_constant (strinfo *, unsigned HOST_WIDE_INT, tree);
+static void handle_builtin_stxncpy (built_in_function, gimple_stmt_iterator *);
 
 /* Return:
 
@@ -227,8 +243,9 @@ get_addr_stridx (tree exp, tree ptr, unsigned HOST_WIDE_INT *offset_out)
   if (!decl_to_stridxlist_htab)
     return 0;
 
-  base = get_addr_base_and_unit_offset (exp, &off);
-  if (base == NULL || !DECL_P (base))
+  poly_int64 poff;
+  base = get_addr_base_and_unit_offset (exp, &poff);
+  if (base == NULL || !DECL_P (base) || !poff.is_constant (&off))
     return 0;
 
   list = decl_to_stridxlist_htab->get (base);
@@ -274,8 +291,6 @@ get_addr_stridx (tree exp, tree ptr, unsigned HOST_WIDE_INT *offset_out)
 static int
 get_stridx (tree exp)
 {
-  tree s, o;
-
   if (TREE_CODE (exp) == SSA_NAME)
     {
       if (ssa_ver_to_stridx[SSA_NAME_VERSION (exp)])
@@ -319,18 +334,10 @@ get_stridx (tree exp)
 	return idx;
     }
 
-  s = string_constant (exp, &o);
-  if (s != NULL_TREE
-      && (o == NULL_TREE || tree_fits_shwi_p (o))
-      && TREE_STRING_LENGTH (s) > 0)
-    {
-      HOST_WIDE_INT offset = o ? tree_to_shwi (o) : 0;
-      const char *p = TREE_STRING_POINTER (s);
-      int max = TREE_STRING_LENGTH (s) - 1;
+  const char *p = c_getstr (exp);
+  if (p)
+    return ~(int) strlen (p);
 
-      if (p[max] == '\0' && offset >= 0 && offset <= max)
-	return ~(int) strlen (p + offset);
-    }
   return 0;
 }
 
@@ -368,8 +375,9 @@ addr_stridxptr (tree exp)
 {
   HOST_WIDE_INT off;
 
-  tree base = get_addr_base_and_unit_offset (exp, &off);
-  if (base == NULL_TREE || !DECL_P (base))
+  poly_int64 poff;
+  tree base = get_addr_base_and_unit_offset (exp, &poff);
+  if (base == NULL_TREE || !DECL_P (base) || !poff.is_constant (&off))
     return NULL;
 
   if (!decl_to_stridxlist_htab)
@@ -557,14 +565,13 @@ get_string_length (strinfo *si)
   if (si->stmt)
     {
       gimple *stmt = si->stmt, *lenstmt;
-      bool with_bounds = gimple_call_with_bounds_p (stmt);
       tree callee, lhs, fn, tem;
       location_t loc;
       gimple_stmt_iterator gsi;
 
       gcc_assert (is_gimple_call (stmt));
       callee = gimple_call_fndecl (stmt);
-      gcc_assert (callee && DECL_BUILT_IN_CLASS (callee) == BUILT_IN_NORMAL);
+      gcc_assert (callee && fndecl_built_in_p (callee, BUILT_IN_NORMAL));
       lhs = gimple_call_lhs (stmt);
       /* unshare_strinfo is intentionally not called here.  The (delayed)
 	 transformation of strcpy or strcat into stpcpy is done at the place
@@ -576,20 +583,11 @@ get_string_length (strinfo *si)
 	{
 	case BUILT_IN_STRCAT:
 	case BUILT_IN_STRCAT_CHK:
-	case BUILT_IN_STRCAT_CHKP:
-	case BUILT_IN_STRCAT_CHK_CHKP:
 	  gsi = gsi_for_stmt (stmt);
 	  fn = builtin_decl_implicit (BUILT_IN_STRLEN);
 	  gcc_assert (lhs == NULL_TREE);
 	  tem = unshare_expr (gimple_call_arg (stmt, 0));
-	  if (with_bounds)
-	    {
-	      lenstmt = gimple_build_call (chkp_maybe_create_clone (fn)->decl,
-					   2, tem, gimple_call_arg (stmt, 1));
-	      gimple_call_set_with_bounds (lenstmt, true);
-	    }
-	  else
-	    lenstmt = gimple_build_call (fn, 1, tem);
+	  lenstmt = gimple_build_call (fn, 1, tem);
 	  lhs = make_ssa_name (TREE_TYPE (TREE_TYPE (fn)), lenstmt);
 	  gimple_call_set_lhs (lenstmt, lhs);
 	  gimple_set_vuse (lenstmt, gimple_vuse (stmt));
@@ -610,15 +608,11 @@ get_string_length (strinfo *si)
 	  /* FALLTHRU */
 	case BUILT_IN_STRCPY:
 	case BUILT_IN_STRCPY_CHK:
-	case BUILT_IN_STRCPY_CHKP:
-	case BUILT_IN_STRCPY_CHK_CHKP:
 	  gcc_assert (builtin_decl_implicit_p (BUILT_IN_STPCPY));
-	  if (gimple_call_num_args (stmt) == (with_bounds ? 4 : 2))
+	  if (gimple_call_num_args (stmt) == 2)
 	    fn = builtin_decl_implicit (BUILT_IN_STPCPY);
 	  else
 	    fn = builtin_decl_explicit (BUILT_IN_STPCPY_CHK);
-	  if (with_bounds)
-	    fn = chkp_maybe_create_clone (fn)->decl;
 	  gcc_assert (lhs == NULL_TREE);
 	  if (dump_file && (dump_flags & TDF_DETAILS) != 0)
 	    {
@@ -637,8 +631,6 @@ get_string_length (strinfo *si)
 	  /* FALLTHRU */
 	case BUILT_IN_STPCPY:
 	case BUILT_IN_STPCPY_CHK:
-	case BUILT_IN_STPCPY_CHKP:
-	case BUILT_IN_STPCPY_CHK_CHKP:
 	  gcc_assert (lhs != NULL_TREE);
 	  loc = gimple_location (stmt);
 	  set_endptr_and_length (loc, si, lhs);
@@ -777,9 +769,9 @@ get_stridx_plus_constant (strinfo *basesi, unsigned HOST_WIDE_INT off,
   si = new_strinfo (ptr, idx, build_int_cst (size_type_node, nonzero_chars),
 		    basesi->full_string_p);
   set_strinfo (idx, si);
-  if (chainsi->next)
+  if (strinfo *nextsi = get_strinfo (chainsi->next))
     {
-      strinfo *nextsi = unshare_strinfo (get_strinfo (chainsi->next));
+      nextsi = unshare_strinfo (nextsi);
       si->next = nextsi->idx;
       nextsi->prev = idx;
     }
@@ -983,9 +975,7 @@ valid_builtin_call (gimple *stmt)
     case BUILT_IN_MEMCMP:
     case BUILT_IN_MEMCMP_EQ:
     case BUILT_IN_STRCHR:
-    case BUILT_IN_STRCHR_CHKP:
     case BUILT_IN_STRLEN:
-    case BUILT_IN_STRLEN_CHKP:
       /* The above functions should be pure.  Punt if they aren't.  */
       if (gimple_vdef (stmt) || gimple_vuse (stmt) == NULL_TREE)
 	return false;
@@ -995,25 +985,15 @@ valid_builtin_call (gimple *stmt)
     case BUILT_IN_MALLOC:
     case BUILT_IN_MEMCPY:
     case BUILT_IN_MEMCPY_CHK:
-    case BUILT_IN_MEMCPY_CHKP:
-    case BUILT_IN_MEMCPY_CHK_CHKP:
     case BUILT_IN_MEMPCPY:
     case BUILT_IN_MEMPCPY_CHK:
-    case BUILT_IN_MEMPCPY_CHKP:
-    case BUILT_IN_MEMPCPY_CHK_CHKP:
     case BUILT_IN_MEMSET:
     case BUILT_IN_STPCPY:
     case BUILT_IN_STPCPY_CHK:
-    case BUILT_IN_STPCPY_CHKP:
-    case BUILT_IN_STPCPY_CHK_CHKP:
     case BUILT_IN_STRCAT:
     case BUILT_IN_STRCAT_CHK:
-    case BUILT_IN_STRCAT_CHKP:
-    case BUILT_IN_STRCAT_CHK_CHKP:
     case BUILT_IN_STRCPY:
     case BUILT_IN_STRCPY_CHK:
-    case BUILT_IN_STRCPY_CHKP:
-    case BUILT_IN_STRCPY_CHK_CHKP:
       /* The above functions should be neither const nor pure.  Punt if they
 	 aren't.  */
       if (gimple_vdef (stmt) == NULL_TREE || gimple_vuse (stmt) == NULL_TREE)
@@ -1102,10 +1082,6 @@ adjust_last_stmt (strinfo *si, gimple *stmt, bool is_strcat)
     case BUILT_IN_MEMCPY:
     case BUILT_IN_MEMCPY_CHK:
       break;
-    case BUILT_IN_MEMCPY_CHKP:
-    case BUILT_IN_MEMCPY_CHK_CHKP:
-      len_arg_no = 4;
-      break;
     default:
       return;
     }
@@ -1120,6 +1096,13 @@ adjust_last_stmt (strinfo *si, gimple *stmt, bool is_strcat)
       /* Don't adjust the length if it is divisible by 4, it is more efficient
 	 to store the extra '\0' in that case.  */
       if ((tree_to_uhwi (len) & 3) == 0)
+	return;
+
+      /* Don't fold away an out of bounds access, as this defeats proper
+	 warnings.  */
+      tree dst = gimple_call_arg (last.stmt, 0);
+      tree size = compute_objsize (dst, 0);
+      if (size && tree_int_cst_lt (size, len))
 	return;
     }
   else if (TREE_CODE (len) == SSA_NAME)
@@ -1138,6 +1121,106 @@ adjust_last_stmt (strinfo *si, gimple *stmt, bool is_strcat)
   update_stmt (last.stmt);
 }
 
+/* For an LHS that is an SSA_NAME and for strlen() or strnlen() argument
+   SRC, set LHS range info to [0, min (N, BOUND)] if SRC refers to
+   a character array A[N] with unknown length bounded by N, and for
+   strnlen(), by min (N, BOUND).  */
+
+static tree
+maybe_set_strlen_range (tree lhs, tree src, tree bound)
+{
+  if (TREE_CODE (lhs) != SSA_NAME
+      || !INTEGRAL_TYPE_P (TREE_TYPE (lhs)))
+    return NULL_TREE;
+
+  if (TREE_CODE (src) == SSA_NAME)
+    {
+      gimple *def = SSA_NAME_DEF_STMT (src);
+      if (is_gimple_assign (def)
+	  && gimple_assign_rhs_code (def) == ADDR_EXPR)
+	src = gimple_assign_rhs1 (def);
+    }
+
+  wide_int max = wi::to_wide (TYPE_MAX_VALUE (ptrdiff_type_node));
+  wide_int min = wi::zero (max.get_precision ());
+
+  if (TREE_CODE (src) == ADDR_EXPR)
+    {
+      /* The last array member of a struct can be bigger than its size
+	 suggests if it's treated as a poor-man's flexible array member.  */
+      src = TREE_OPERAND (src, 0);
+      bool src_is_array = TREE_CODE (TREE_TYPE (src)) == ARRAY_TYPE;
+      if (src_is_array
+	  && TREE_CODE (src) != MEM_REF
+	  && !array_at_struct_end_p (src))
+	{
+	  tree type = TREE_TYPE (src);
+	  if (tree size = TYPE_SIZE_UNIT (type))
+	    if (size && TREE_CODE (size) == INTEGER_CST)
+	      max = wi::to_wide (size);
+
+	  /* For strlen() the upper bound above is equal to
+	     the longest string that can be stored in the array
+	     (i.e., it accounts for the terminating nul.  For
+	     strnlen() bump up the maximum by one since the array
+	     need not be nul-terminated.  */
+	  if (!bound && max != 0)
+	    --max;
+	}
+      else
+	{
+	  if (TREE_CODE (src) == COMPONENT_REF && !src_is_array)
+	    src = TREE_OPERAND (src, 1);
+	  if (DECL_P (src))
+	    {
+	      /* Handle the unlikely case of strlen (&c) where c is some
+		 variable.  */
+	      if (tree size = DECL_SIZE_UNIT (src))
+		if (TREE_CODE (size) == INTEGER_CST)
+		  max = wi::to_wide (size);
+	    }
+	}
+    }
+
+  if (bound)
+    {
+      /* For strnlen, adjust MIN and MAX as necessary.  If the bound
+	 is less than the size of the array set MAX to it.  It it's
+	 greater than MAX and MAX is non-zero bump MAX down to account
+	 for the necessary terminating nul.  Otherwise leave it alone.  */
+      if (TREE_CODE (bound) == INTEGER_CST)
+	{
+	  wide_int wibnd = wi::to_wide (bound);
+	  int cmp = wi::cmpu (wibnd, max);
+	  if (cmp < 0)
+	    max = wibnd;
+	  else if (cmp && wi::ne_p (max, min))
+	    --max;
+	}
+      else if (TREE_CODE (bound) == SSA_NAME)
+	{
+	  wide_int minbound, maxbound;
+	  value_range_kind rng = get_range_info (bound, &minbound, &maxbound);
+	  if (rng == VR_RANGE)
+	    {
+	      /* For a bound in a known range, adjust the range determined
+		 above as necessary.  For a bound in some anti-range or
+		 in an unknown range, use the range determined above.  */
+	      if (wi::ltu_p (minbound, min))
+		min = minbound;
+	      if (wi::ltu_p (maxbound, max))
+		max = maxbound;
+	    }
+	}
+    }
+
+  if (min == max)
+    return wide_int_to_tree (size_type_node, min);
+
+  set_range_info (lhs, VR_RANGE, min, max);
+  return lhs;
+}
+
 /* Handle a strlen call.  If strlen of the argument is known, replace
    the strlen call with the known value, otherwise remember that strlen
    of the argument is stored in the lhs SSA_NAME.  */
@@ -1145,16 +1228,18 @@ adjust_last_stmt (strinfo *si, gimple *stmt, bool is_strcat)
 static void
 handle_builtin_strlen (gimple_stmt_iterator *gsi)
 {
-  int idx;
-  tree src;
   gimple *stmt = gsi_stmt (*gsi);
   tree lhs = gimple_call_lhs (stmt);
 
   if (lhs == NULL_TREE)
     return;
 
-  src = gimple_call_arg (stmt, 0);
-  idx = get_stridx (src);
+  location_t loc = gimple_location (stmt);
+  tree callee = gimple_call_fndecl (stmt);
+  tree src = gimple_call_arg (stmt, 0);
+  tree bound = (DECL_FUNCTION_CODE (callee) == BUILT_IN_STRNLEN
+		? gimple_call_arg (stmt, 1) : NULL_TREE);
+  int idx = get_stridx (src);
   if (idx)
     {
       strinfo *si = NULL;
@@ -1178,8 +1263,21 @@ handle_builtin_strlen (gimple_stmt_iterator *gsi)
 	    }
 	  rhs = unshare_expr (rhs);
 	  if (!useless_type_conversion_p (TREE_TYPE (lhs), TREE_TYPE (rhs)))
-	    rhs = fold_convert_loc (gimple_location (stmt),
-				    TREE_TYPE (lhs), rhs);
+	    rhs = fold_convert_loc (loc, TREE_TYPE (lhs), rhs);
+
+	  /* Set for strnlen() calls with a non-constant bound.  */
+	  bool noncst_bound = false;
+	  if (bound)
+	    {
+	      tree new_rhs
+		= fold_build2_loc (loc, MIN_EXPR, TREE_TYPE (rhs), rhs, bound);
+
+	      noncst_bound = (TREE_CODE (new_rhs) != INTEGER_CST
+			      || tree_int_cst_lt (new_rhs, rhs));
+
+	      rhs = new_rhs;
+	    }
+
 	  if (!update_call_from_tree (gsi, rhs))
 	    gimplify_and_update_call_from_tree (gsi, rhs);
 	  stmt = gsi_stmt (*gsi);
@@ -1189,6 +1287,12 @@ handle_builtin_strlen (gimple_stmt_iterator *gsi)
 	      fprintf (dump_file, "into: ");
 	      print_gimple_stmt (dump_file, stmt, 0, TDF_SLIM);
 	    }
+
+	  /* Avoid storing the length for calls to strnlen() with
+	     a non-constant bound.  */
+	  if (noncst_bound)
+	    return;
+
 	  if (si != NULL
 	      && TREE_CODE (si->nonzero_chars) != SSA_NAME
 	      && TREE_CODE (si->nonzero_chars) != INTEGER_CST
@@ -1198,11 +1302,16 @@ handle_builtin_strlen (gimple_stmt_iterator *gsi)
 	      si->nonzero_chars = lhs;
 	      gcc_assert (si->full_string_p);
 	    }
+
+	  if (strlen_to_stridx)
+	    strlen_to_stridx->put (lhs, stridx_strlenloc (idx, loc));
+
 	  return;
 	}
     }
   if (SSA_NAME_OCCURS_IN_ABNORMAL_PHI (lhs))
     return;
+
   if (idx == 0)
     idx = new_stridx (src);
   else
@@ -1220,7 +1329,6 @@ handle_builtin_strlen (gimple_stmt_iterator *gsi)
 	      si->full_string_p = true;
 	      if (TREE_CODE (old) == INTEGER_CST)
 		{
-		  location_t loc = gimple_location (stmt);
 		  old = fold_convert_loc (loc, TREE_TYPE (lhs), old);
 		  tree adj = fold_build2_loc (loc, MINUS_EXPR,
 					      TREE_TYPE (lhs), lhs, old);
@@ -1238,9 +1346,42 @@ handle_builtin_strlen (gimple_stmt_iterator *gsi)
     }
   if (idx)
     {
-      strinfo *si = new_strinfo (src, idx, lhs, true);
-      set_strinfo (idx, si);
-      find_equal_ptrs (src, idx);
+      if (!bound)
+	{
+	  /* Only store the new length information for calls to strlen(),
+	     not for those to strnlen().  */
+	  strinfo *si = new_strinfo (src, idx, lhs, true);
+	  set_strinfo (idx, si);
+	  find_equal_ptrs (src, idx);
+	}
+
+      /* For SRC that is an array of N elements, set LHS's range
+	 to [0, min (N, BOUND)].  A constant return value means
+	 the range would have consisted of a single value.  In
+	 that case, fold the result into the returned constant.  */
+      if (tree ret = maybe_set_strlen_range (lhs, src, bound))
+	if (TREE_CODE (ret) == INTEGER_CST)
+	  {
+	    if (dump_file && (dump_flags & TDF_DETAILS) != 0)
+	      {
+		fprintf (dump_file, "Optimizing: ");
+		print_gimple_stmt (dump_file, stmt, 0, TDF_SLIM);
+	      }
+	    if (!useless_type_conversion_p (TREE_TYPE (lhs), TREE_TYPE (ret)))
+	      ret = fold_convert_loc (loc, TREE_TYPE (lhs), ret);
+	    if (!update_call_from_tree (gsi, ret))
+	      gimplify_and_update_call_from_tree (gsi, ret);
+	    stmt = gsi_stmt (*gsi);
+	    update_stmt (stmt);
+	    if (dump_file && (dump_flags & TDF_DETAILS) != 0)
+	      {
+		fprintf (dump_file, "into: ");
+		print_gimple_stmt (dump_file, stmt, 0, TDF_SLIM);
+	      }
+	  }
+
+      if (strlen_to_stridx && !bound)
+	strlen_to_stridx->put (lhs, stridx_strlenloc (idx, loc));
     }
 }
 
@@ -1255,12 +1396,11 @@ handle_builtin_strchr (gimple_stmt_iterator *gsi)
   tree src;
   gimple *stmt = gsi_stmt (*gsi);
   tree lhs = gimple_call_lhs (stmt);
-  bool with_bounds = gimple_call_with_bounds_p (stmt);
 
   if (lhs == NULL_TREE)
     return;
 
-  if (!integer_zerop (gimple_call_arg (stmt, with_bounds ? 2 : 1)))
+  if (!integer_zerop (gimple_call_arg (stmt, 1)))
     return;
 
   src = gimple_call_arg (stmt, 0);
@@ -1362,14 +1502,13 @@ static void
 handle_builtin_strcpy (enum built_in_function bcode, gimple_stmt_iterator *gsi)
 {
   int idx, didx;
-  tree src, dst, srclen, len, lhs, args, type, fn, oldlen;
+  tree src, dst, srclen, len, lhs, type, fn, oldlen;
   bool success;
   gimple *stmt = gsi_stmt (*gsi);
   strinfo *si, *dsi, *olddsi, *zsi;
   location_t loc;
-  bool with_bounds = gimple_call_with_bounds_p (stmt);
 
-  src = gimple_call_arg (stmt, with_bounds ? 2 : 1);
+  src = gimple_call_arg (stmt, 1);
   dst = gimple_call_arg (stmt, 0);
   lhs = gimple_call_lhs (stmt);
   idx = get_stridx (src);
@@ -1400,15 +1539,11 @@ handle_builtin_strcpy (enum built_in_function bcode, gimple_stmt_iterator *gsi)
       {
       case BUILT_IN_STRCPY:
       case BUILT_IN_STRCPY_CHK:
-      case BUILT_IN_STRCPY_CHKP:
-      case BUILT_IN_STRCPY_CHK_CHKP:
 	if (lhs != NULL_TREE || !builtin_decl_implicit_p (BUILT_IN_STPCPY))
 	  return;
 	break;
       case BUILT_IN_STPCPY:
       case BUILT_IN_STPCPY_CHK:
-      case BUILT_IN_STPCPY_CHKP:
-      case BUILT_IN_STPCPY_CHK_CHKP:
 	if (lhs == NULL_TREE)
 	  return;
 	else
@@ -1478,6 +1613,22 @@ handle_builtin_strcpy (enum built_in_function bcode, gimple_stmt_iterator *gsi)
 	    }
 	}
       dsi->stmt = stmt;
+
+      /* Try to detect overlap before returning.  This catches cases
+	 like strcpy (d, d + n) where n is non-constant whose range
+	 is such that (n <= strlen (d) holds).
+
+	 OLDDSI->NONZERO_chars may have been reset by this point with
+	 oldlen holding it original value.  */
+      if (olddsi && oldlen)
+	{
+	  /* Add 1 for the terminating NUL.  */
+	  tree type = TREE_TYPE (oldlen);
+	  oldlen = fold_build2 (PLUS_EXPR, type, oldlen,
+				build_int_cst (type, 1));
+	  check_bounds_or_overlap (stmt, olddsi->ptr, src, oldlen, NULL_TREE);
+	}
+
       return;
     }
 
@@ -1509,19 +1660,16 @@ handle_builtin_strcpy (enum built_in_function bcode, gimple_stmt_iterator *gsi)
   switch (bcode)
     {
     case BUILT_IN_STRCPY:
-    case BUILT_IN_STRCPY_CHKP:
       fn = builtin_decl_implicit (BUILT_IN_MEMCPY);
       if (lhs)
 	ssa_ver_to_stridx[SSA_NAME_VERSION (lhs)] = didx;
       break;
     case BUILT_IN_STRCPY_CHK:
-    case BUILT_IN_STRCPY_CHK_CHKP:
       fn = builtin_decl_explicit (BUILT_IN_MEMCPY_CHK);
       if (lhs)
 	ssa_ver_to_stridx[SSA_NAME_VERSION (lhs)] = didx;
       break;
     case BUILT_IN_STPCPY:
-    case BUILT_IN_STPCPY_CHKP:
       /* This would need adjustment of the lhs (subtract one),
 	 or detection that the trailing '\0' doesn't need to be
 	 written, if it will be immediately overwritten.
@@ -1533,7 +1681,6 @@ handle_builtin_strcpy (enum built_in_function bcode, gimple_stmt_iterator *gsi)
 	}
       break;
     case BUILT_IN_STPCPY_CHK:
-    case BUILT_IN_STPCPY_CHK_CHKP:
       /* This would need adjustment of the lhs (subtract one),
 	 or detection that the trailing '\0' doesn't need to be
 	 written, if it will be immediately overwritten.
@@ -1550,14 +1697,31 @@ handle_builtin_strcpy (enum built_in_function bcode, gimple_stmt_iterator *gsi)
   if (zsi != NULL)
     zsi->dont_invalidate = true;
 
-  if (fn == NULL_TREE)
-    return;
-
-  args = TYPE_ARG_TYPES (TREE_TYPE (fn));
-  type = TREE_VALUE (TREE_CHAIN (TREE_CHAIN (args)));
+  if (fn)
+    {
+      tree args = TYPE_ARG_TYPES (TREE_TYPE (fn));
+      type = TREE_VALUE (TREE_CHAIN (TREE_CHAIN (args)));
+    }
+  else
+    type = size_type_node;
 
   len = fold_convert_loc (loc, type, unshare_expr (srclen));
   len = fold_build2_loc (loc, PLUS_EXPR, type, len, build_int_cst (type, 1));
+
+  /* Set the no-warning bit on the transformed statement?  */
+  bool set_no_warning = false;
+
+  if (const strinfo *chksi = olddsi ? olddsi : dsi)
+    if (si
+	&& !check_bounds_or_overlap (stmt, chksi->ptr, si->ptr, NULL_TREE, len))
+      {
+	gimple_set_no_warning (stmt, true);
+	set_no_warning = true;
+      }
+
+  if (fn == NULL_TREE)
+    return;
+
   len = force_gimple_operand_gsi (gsi, len, true, NULL_TREE, true,
 				  GSI_SAME_STMT);
   if (dump_file && (dump_flags & TDF_DETAILS) != 0)
@@ -1565,33 +1729,14 @@ handle_builtin_strcpy (enum built_in_function bcode, gimple_stmt_iterator *gsi)
       fprintf (dump_file, "Optimizing: ");
       print_gimple_stmt (dump_file, stmt, 0, TDF_SLIM);
     }
-  if (with_bounds)
-    {
-      fn = chkp_maybe_create_clone (fn)->decl;
-      if (gimple_call_num_args (stmt) == 4)
-	success = update_gimple_call (gsi, fn, 5, dst,
-				      gimple_call_arg (stmt, 1),
-				      src,
-				      gimple_call_arg (stmt, 3),
-				      len);
-      else
-	success = update_gimple_call (gsi, fn, 6, dst,
-				      gimple_call_arg (stmt, 1),
-				      src,
-				      gimple_call_arg (stmt, 3),
-				      len,
-				      gimple_call_arg (stmt, 4));
-    }
+  if (gimple_call_num_args (stmt) == 2)
+    success = update_gimple_call (gsi, fn, 3, dst, src, len);
   else
-    if (gimple_call_num_args (stmt) == 2)
-      success = update_gimple_call (gsi, fn, 3, dst, src, len);
-    else
-      success = update_gimple_call (gsi, fn, 4, dst, src, len,
-				    gimple_call_arg (stmt, 2));
+    success = update_gimple_call (gsi, fn, 4, dst, src, len,
+				  gimple_call_arg (stmt, 2));
   if (success)
     {
       stmt = gsi_stmt (*gsi);
-      gimple_call_set_with_bounds (stmt, with_bounds);
       update_stmt (stmt);
       if (dump_file && (dump_flags & TDF_DETAILS) != 0)
 	{
@@ -1605,6 +1750,485 @@ handle_builtin_strcpy (enum built_in_function bcode, gimple_stmt_iterator *gsi)
     }
   else if (dump_file && (dump_flags & TDF_DETAILS) != 0)
     fprintf (dump_file, "not possible.\n");
+
+  if (set_no_warning)
+    gimple_set_no_warning (stmt, true);
+}
+
+/* Check the size argument to the built-in forms of stpncpy and strncpy
+   for out-of-bounds offsets or overlapping access, and to see if the
+   size argument is derived from a call to strlen() on the source argument,
+   and if so, issue an appropriate warning.  */
+
+static void
+handle_builtin_strncat (built_in_function bcode, gimple_stmt_iterator *gsi)
+{
+  /* Same as stxncpy().  */
+  handle_builtin_stxncpy (bcode, gsi);
+}
+
+/* Return true if LEN depends on a call to strlen(SRC) in an interesting
+   way.  LEN can either be an integer expression, or a pointer (to char).
+   When it is the latter (such as in recursive calls to self) is is
+   assumed to be the argument in some call to strlen() whose relationship
+   to SRC is being ascertained.  */
+
+bool
+is_strlen_related_p (tree src, tree len)
+{
+  if (TREE_CODE (TREE_TYPE (len)) == POINTER_TYPE
+      && operand_equal_p (src, len, 0))
+    return true;
+
+  if (TREE_CODE (len) != SSA_NAME)
+    return false;
+
+  gimple *def_stmt = SSA_NAME_DEF_STMT (len);
+  if (!def_stmt)
+    return false;
+
+  if (is_gimple_call (def_stmt))
+    {
+      tree func = gimple_call_fndecl (def_stmt);
+      if (!valid_builtin_call (def_stmt)
+	  || DECL_FUNCTION_CODE (func) != BUILT_IN_STRLEN)
+	return false;
+
+      tree arg = gimple_call_arg (def_stmt, 0);
+      return is_strlen_related_p (src, arg);
+    }
+
+  if (!is_gimple_assign (def_stmt))
+    return false;
+
+  tree_code code = gimple_assign_rhs_code (def_stmt);
+  tree rhs1 = gimple_assign_rhs1 (def_stmt);
+  tree rhstype = TREE_TYPE (rhs1);
+
+  if ((TREE_CODE (rhstype) == POINTER_TYPE && code == POINTER_PLUS_EXPR)
+      || (INTEGRAL_TYPE_P (rhstype)
+	  && (code == BIT_AND_EXPR
+	      || code == NOP_EXPR)))
+    {
+      /* Pointer plus (an integer), and truncation are considered among
+	 the (potentially) related expressions to strlen.  */
+      return is_strlen_related_p (src, rhs1);
+    }
+
+  if (tree rhs2 = gimple_assign_rhs2 (def_stmt))
+    {
+      /* Integer subtraction is considered strlen-related when both
+	 arguments are integers and second one is strlen-related.  */
+      rhstype = TREE_TYPE (rhs2);
+      if (INTEGRAL_TYPE_P (rhstype) && code == MINUS_EXPR)
+	return is_strlen_related_p (src, rhs2);
+    }
+
+  return false;
+}
+
+/* Called by handle_builtin_stxncpy and by gimple_fold_builtin_strncpy
+   in gimple-fold.c.
+   Check to see if the specified bound is a) equal to the size of
+   the destination DST and if so, b) if it's immediately followed by
+   DST[CNT - 1] = '\0'.  If a) holds and b) does not, warn.  Otherwise,
+   do nothing.  Return true if diagnostic has been issued.
+
+   The purpose is to diagnose calls to strncpy and stpncpy that do
+   not nul-terminate the copy while allowing for the idiom where
+   such a call is immediately followed by setting the last element
+   to nul, as in:
+     char a[32];
+     strncpy (a, s, sizeof a);
+     a[sizeof a - 1] = '\0';
+*/
+
+bool
+maybe_diag_stxncpy_trunc (gimple_stmt_iterator gsi, tree src, tree cnt)
+{
+  gimple *stmt = gsi_stmt (gsi);
+  if (gimple_no_warning_p (stmt))
+    return false;
+
+  wide_int cntrange[2];
+
+  if (TREE_CODE (cnt) == INTEGER_CST)
+    cntrange[0] = cntrange[1] = wi::to_wide (cnt);
+  else if (TREE_CODE (cnt) == SSA_NAME)
+    {
+      enum value_range_kind rng = get_range_info (cnt, cntrange, cntrange + 1);
+      if (rng == VR_RANGE)
+	;
+      else if (rng == VR_ANTI_RANGE)
+	{
+	  wide_int maxobjsize = wi::to_wide (TYPE_MAX_VALUE (ptrdiff_type_node));
+
+	  if (wi::ltu_p (cntrange[1], maxobjsize))
+	    {
+	      cntrange[0] = cntrange[1] + 1;
+	      cntrange[1] = maxobjsize;
+	    }
+	  else
+	    {
+	      cntrange[1] = cntrange[0] - 1;
+	      cntrange[0] = wi::zero (TYPE_PRECISION (TREE_TYPE (cnt)));
+	    }
+	}
+      else
+	return false;
+    }
+  else
+    return false;
+
+  /* Negative value is the constant string length.  If it's less than
+     the lower bound there is no truncation.  Avoid calling get_stridx()
+     when ssa_ver_to_stridx is empty.  That implies the caller isn't
+     running under the control of this pass and ssa_ver_to_stridx hasn't
+     been created yet.  */
+  int sidx = ssa_ver_to_stridx.length () ? get_stridx (src) : 0;
+  if (sidx < 0 && wi::gtu_p (cntrange[0], ~sidx))
+    return false;
+
+  tree dst = gimple_call_arg (stmt, 0);
+  tree dstdecl = dst;
+  if (TREE_CODE (dstdecl) == ADDR_EXPR)
+    dstdecl = TREE_OPERAND (dstdecl, 0);
+
+  tree ref = NULL_TREE;
+
+  if (!sidx)
+    {
+      /* If the source is a non-string return early to avoid warning
+	 for possible truncation (if the truncation is certain SIDX
+	 is non-zero).  */
+      tree srcdecl = gimple_call_arg (stmt, 1);
+      if (TREE_CODE (srcdecl) == ADDR_EXPR)
+	srcdecl = TREE_OPERAND (srcdecl, 0);
+      if (get_attr_nonstring_decl (srcdecl, &ref))
+	return false;
+    }
+
+  /* Likewise, if the destination refers to a an array/pointer declared
+     nonstring return early.  */
+  if (get_attr_nonstring_decl (dstdecl, &ref))
+    return false;
+
+  /* Look for dst[i] = '\0'; after the stxncpy() call and if found
+     avoid the truncation warning.  */
+  gsi_next_nondebug (&gsi);
+  gimple *next_stmt = gsi_stmt (gsi);
+  if (!next_stmt)
+    {
+      /* When there is no statement in the same basic block check
+	 the immediate successor block.  */
+      if (basic_block bb = gimple_bb (stmt))
+	{
+	  if (single_succ_p (bb))
+	    {
+	      /* For simplicity, ignore blocks with multiple outgoing
+		 edges for now and only consider successor blocks along
+		 normal edges.  */
+	      edge e = EDGE_SUCC (bb, 0);
+	      if (!(e->flags & EDGE_ABNORMAL))
+		{
+		  gsi = gsi_start_bb (e->dest);
+		  next_stmt = gsi_stmt (gsi);
+		  if (next_stmt && is_gimple_debug (next_stmt))
+		    {
+		      gsi_next_nondebug (&gsi);
+		      next_stmt = gsi_stmt (gsi);
+		    }
+		}
+	    }
+	}
+    }
+
+  if (next_stmt && is_gimple_assign (next_stmt))
+    {
+      tree lhs = gimple_assign_lhs (next_stmt);
+      tree_code code = TREE_CODE (lhs);
+      if (code == ARRAY_REF || code == MEM_REF)
+	lhs = TREE_OPERAND (lhs, 0);
+
+      tree func = gimple_call_fndecl (stmt);
+      if (DECL_FUNCTION_CODE (func) == BUILT_IN_STPNCPY)
+	{
+	  tree ret = gimple_call_lhs (stmt);
+	  if (ret && operand_equal_p (ret, lhs, 0))
+	    return false;
+	}
+
+      /* Determine the base address and offset of the reference,
+	 ignoring the innermost array index.  */
+      if (TREE_CODE (ref) == ARRAY_REF)
+	ref = TREE_OPERAND (ref, 0);
+
+      poly_int64 dstoff;
+      tree dstbase = get_addr_base_and_unit_offset (ref, &dstoff);
+
+      poly_int64 lhsoff;
+      tree lhsbase = get_addr_base_and_unit_offset (lhs, &lhsoff);
+      if (lhsbase
+	  && dstbase
+	  && known_eq (dstoff, lhsoff)
+	  && operand_equal_p (dstbase, lhsbase, 0))
+	return false;
+    }
+
+  int prec = TYPE_PRECISION (TREE_TYPE (cnt));
+  wide_int lenrange[2];
+  if (strinfo *sisrc = sidx > 0 ? get_strinfo (sidx) : NULL)
+    {
+      lenrange[0] = (sisrc->nonzero_chars
+		     && TREE_CODE (sisrc->nonzero_chars) == INTEGER_CST
+		     ? wi::to_wide (sisrc->nonzero_chars)
+		     : wi::zero (prec));
+      lenrange[1] = lenrange[0];
+    }
+  else if (sidx < 0)
+    lenrange[0] = lenrange[1] = wi::shwi (~sidx, prec);
+  else
+    {
+      tree range[2];
+      get_range_strlen (src, range);
+      if (range[0] != NULL_TREE
+	  && TREE_CODE (range[0]) == INTEGER_CST
+	  && range[1] != NULL_TREE
+	  && TREE_CODE (range[1]) == INTEGER_CST)
+	{
+	  lenrange[0] = wi::to_wide (range[0], prec);
+	  lenrange[1] = wi::to_wide (range[1], prec);
+	}
+      else
+	{
+	  lenrange[0] = wi::shwi (0, prec);
+	  lenrange[1] = wi::shwi (-1, prec);
+	}
+    }
+
+  location_t callloc = gimple_nonartificial_location (stmt);
+  callloc = expansion_point_location_if_in_system_header (callloc);
+
+  tree func = gimple_call_fndecl (stmt);
+
+  if (lenrange[0] != 0 || !wi::neg_p (lenrange[1]))
+    {
+      /* If the longest source string is shorter than the lower bound
+	 of the specified count the copy is definitely nul-terminated.  */
+      if (wi::ltu_p (lenrange[1], cntrange[0]))
+	return false;
+
+      if (wi::neg_p (lenrange[1]))
+	{
+	  /* The length of one of the strings is unknown but at least
+	     one has non-zero length and that length is stored in
+	     LENRANGE[1].  Swap the bounds to force a "may be truncated"
+	     warning below.  */
+	  lenrange[1] = lenrange[0];
+	  lenrange[0] = wi::shwi (0, prec);
+	}
+
+      /* Set to true for strncat whose bound is derived from the length
+	 of the destination (the expected usage pattern).  */
+      bool cat_dstlen_bounded = false;
+      if (DECL_FUNCTION_CODE (func) == BUILT_IN_STRNCAT)
+	cat_dstlen_bounded = is_strlen_related_p (dst, cnt);
+
+      if (lenrange[0] == cntrange[1] && cntrange[0] == cntrange[1])
+	return warning_n (callloc, OPT_Wstringop_truncation,
+			  cntrange[0].to_uhwi (),
+			  "%G%qD output truncated before terminating "
+			  "nul copying %E byte from a string of the "
+			  "same length",
+			  "%G%qD output truncated before terminating nul "
+			  "copying %E bytes from a string of the same "
+			  "length",
+			  stmt, func, cnt);
+      else if (!cat_dstlen_bounded)
+	{
+	  if (wi::geu_p (lenrange[0], cntrange[1]))
+	    {
+	      /* The shortest string is longer than the upper bound of
+		 the count so the truncation is certain.  */
+	      if (cntrange[0] == cntrange[1])
+		return warning_n (callloc, OPT_Wstringop_truncation,
+				  cntrange[0].to_uhwi (),
+				  "%G%qD output truncated copying %E byte "
+				  "from a string of length %wu",
+				  "%G%qD output truncated copying %E bytes "
+				  "from a string of length %wu",
+				  stmt, func, cnt, lenrange[0].to_uhwi ());
+
+	      return warning_at (callloc, OPT_Wstringop_truncation,
+				 "%G%qD output truncated copying between %wu "
+				 "and %wu bytes from a string of length %wu",
+				 stmt, func, cntrange[0].to_uhwi (),
+				 cntrange[1].to_uhwi (), lenrange[0].to_uhwi ());
+	    }
+	  else if (wi::geu_p (lenrange[1], cntrange[1]))
+	    {
+	      /* The longest string is longer than the upper bound of
+		 the count so the truncation is possible.  */
+	      if (cntrange[0] == cntrange[1])
+		return warning_n (callloc, OPT_Wstringop_truncation,
+				  cntrange[0].to_uhwi (),
+				  "%G%qD output may be truncated copying %E "
+				  "byte from a string of length %wu",
+				  "%G%qD output may be truncated copying %E "
+				  "bytes from a string of length %wu",
+				  stmt, func, cnt, lenrange[1].to_uhwi ());
+
+	      return warning_at (callloc, OPT_Wstringop_truncation,
+				 "%G%qD output may be truncated copying between "
+				 "%wu and %wu bytes from a string of length %wu",
+				 stmt, func, cntrange[0].to_uhwi (),
+				 cntrange[1].to_uhwi (), lenrange[1].to_uhwi ());
+	    }
+	}
+
+      if (!cat_dstlen_bounded
+	  && cntrange[0] != cntrange[1]
+	  && wi::leu_p (cntrange[0], lenrange[0])
+	  && wi::leu_p (cntrange[1], lenrange[0] + 1))
+	{
+	  /* If the source (including the terminating nul) is longer than
+	     the lower bound of the specified count but shorter than the
+	     upper bound the copy may (but need not) be truncated.  */
+	  return warning_at (callloc, OPT_Wstringop_truncation,
+			     "%G%qD output may be truncated copying between "
+			     "%wu and %wu bytes from a string of length %wu",
+			     stmt, func, cntrange[0].to_uhwi (),
+			     cntrange[1].to_uhwi (), lenrange[0].to_uhwi ());
+	}
+    }
+
+  if (tree dstsize = compute_objsize (dst, 1))
+    {
+      /* The source length is uknown.  Try to determine the destination
+	 size and see if it matches the specified bound.  If not, bail.
+	 Otherwise go on to see if it should be diagnosed for possible
+	 truncation.  */
+      if (!dstsize)
+	return false;
+
+      if (wi::to_wide (dstsize) != cntrange[1])
+	return false;
+
+      if (cntrange[0] == cntrange[1])
+	return warning_at (callloc, OPT_Wstringop_truncation,
+			   "%G%qD specified bound %E equals destination size",
+			   stmt, func, cnt);
+    }
+
+  return false;
+}
+
+/* Check the arguments to the built-in forms of stpncpy and strncpy for
+   out-of-bounds offsets or overlapping access, and to see if the size
+   is derived from calling strlen() on the source argument, and if so,
+   issue the appropriate warning.  */
+
+static void
+handle_builtin_stxncpy (built_in_function, gimple_stmt_iterator *gsi)
+{
+  if (!strlen_to_stridx)
+    return;
+
+  gimple *stmt = gsi_stmt (*gsi);
+
+  tree dst = gimple_call_arg (stmt, 0);
+  tree src = gimple_call_arg (stmt, 1);
+  tree len = gimple_call_arg (stmt, 2);
+  tree dstsize = NULL_TREE, srcsize = NULL_TREE;
+
+  int didx = get_stridx (dst);
+  if (strinfo *sidst = didx > 0 ? get_strinfo (didx) : NULL)
+    {
+      /* Compute the size of the destination string including the NUL.  */
+      if (sidst->nonzero_chars)
+	{
+	  tree type = TREE_TYPE (sidst->nonzero_chars);
+	  dstsize = fold_build2 (PLUS_EXPR, type, sidst->nonzero_chars,
+				 build_int_cst (type, 1));
+	}
+      dst = sidst->ptr;
+    }
+
+  int sidx = get_stridx (src);
+  strinfo *sisrc = sidx > 0 ? get_strinfo (sidx) : NULL;
+  if (sisrc)
+    {
+      /* strncat() and strncpy() can modify the source string by writing
+	 over the terminating nul so SISRC->DONT_INVALIDATE must be left
+	 clear.  */
+
+      /* Compute the size of the source string including the NUL.  */
+      if (sisrc->nonzero_chars)
+	{
+	  tree type = TREE_TYPE (sisrc->nonzero_chars);
+	  srcsize = fold_build2 (PLUS_EXPR, type, sisrc->nonzero_chars,
+				 build_int_cst (type, 1));
+	}
+
+	src = sisrc->ptr;
+    }
+  else
+    srcsize = NULL_TREE;
+
+  if (!check_bounds_or_overlap (stmt, dst, src, dstsize, srcsize))
+    {
+      gimple_set_no_warning (stmt, true);
+      return;
+    }
+
+  /* If the length argument was computed from strlen(S) for some string
+     S retrieve the strinfo index for the string (PSS->FIRST) alonng with
+     the location of the strlen() call (PSS->SECOND).  */
+  stridx_strlenloc *pss = strlen_to_stridx->get (len);
+  if (!pss || pss->first <= 0)
+    {
+      if (maybe_diag_stxncpy_trunc (*gsi, src, len))
+	gimple_set_no_warning (stmt, true);
+
+      return;
+    }
+
+  /* Retrieve the strinfo data for the string S that LEN was computed
+     from as some function F of strlen (S) (i.e., LEN need not be equal
+     to strlen(S)).  */
+  strinfo *silen = get_strinfo (pss->first);
+
+  location_t callloc = gimple_nonartificial_location (stmt);
+  callloc = expansion_point_location_if_in_system_header (callloc);
+
+  tree func = gimple_call_fndecl (stmt);
+
+  bool warned = false;
+
+  /* When -Wstringop-truncation is set, try to determine truncation
+     before diagnosing possible overflow.  Truncation is implied by
+     the LEN argument being equal to strlen(SRC), regardless of
+     whether its value is known.  Otherwise, issue the more generic
+     -Wstringop-overflow which triggers for LEN arguments that in
+     any meaningful way depend on strlen(SRC).  */
+  if (sisrc == silen
+      && is_strlen_related_p (src, len)
+      && warning_at (callloc, OPT_Wstringop_truncation,
+		     "%G%qD output truncated before terminating nul "
+		     "copying as many bytes from a string as its length",
+		     stmt, func))
+    warned = true;
+  else if (silen && is_strlen_related_p (src, silen->ptr))
+    warned = warning_at (callloc, OPT_Wstringop_overflow_,
+			 "%G%qD specified bound depends on the length "
+			 "of the source argument",
+			 stmt, func);
+  if (warned)
+    {
+      location_t strlenloc = pss->second;
+      if (strlenloc != UNKNOWN_LOCATION && strlenloc != callloc)
+	inform (strlenloc, "length computed here");
+    }
 }
 
 /* Handle a memcpy-like ({mem{,p}cpy,__mem{,p}cpy_chk}) call.
@@ -1619,10 +2243,9 @@ handle_builtin_memcpy (enum built_in_function bcode, gimple_stmt_iterator *gsi)
   tree src, dst, len, lhs, oldlen, newlen;
   gimple *stmt = gsi_stmt (*gsi);
   strinfo *si, *dsi, *olddsi;
-  bool with_bounds = gimple_call_with_bounds_p (stmt);
 
-  len = gimple_call_arg (stmt, with_bounds ? 4 : 2);
-  src = gimple_call_arg (stmt, with_bounds ? 2 : 1);
+  len = gimple_call_arg (stmt, 2);
+  src = gimple_call_arg (stmt, 1);
   dst = gimple_call_arg (stmt, 0);
   idx = get_stridx (src);
   if (idx == 0)
@@ -1697,6 +2320,18 @@ handle_builtin_memcpy (enum built_in_function bcode, gimple_stmt_iterator *gsi)
       full_string_p = clen > nonzero_chars;
     }
 
+  if (!full_string_p
+      && olddsi
+      && olddsi->nonzero_chars
+      && TREE_CODE (olddsi->nonzero_chars) == INTEGER_CST
+      && tree_int_cst_le (newlen, olddsi->nonzero_chars))
+    {
+      /* The SRC substring being written strictly overlaps
+	 a subsequence of the existing string OLDDSI.  */
+      newlen = olddsi->nonzero_chars;
+      full_string_p = olddsi->full_string_p;
+    }
+
   if (olddsi != NULL && TREE_CODE (len) == SSA_NAME)
     adjust_last_stmt (olddsi, stmt, false);
 
@@ -1757,8 +2392,6 @@ handle_builtin_memcpy (enum built_in_function bcode, gimple_stmt_iterator *gsi)
 	{
 	case BUILT_IN_MEMCPY:
 	case BUILT_IN_MEMCPY_CHK:
-	case BUILT_IN_MEMCPY_CHKP:
-	case BUILT_IN_MEMCPY_CHK_CHKP:
 	  /* Allow adjust_last_stmt to decrease this memcpy's size.  */
 	  laststmt.stmt = stmt;
 	  laststmt.len = dsi->nonzero_chars;
@@ -1768,8 +2401,6 @@ handle_builtin_memcpy (enum built_in_function bcode, gimple_stmt_iterator *gsi)
 	  break;
 	case BUILT_IN_MEMPCPY:
 	case BUILT_IN_MEMPCPY_CHK:
-	case BUILT_IN_MEMPCPY_CHKP:
-	case BUILT_IN_MEMPCPY_CHK_CHKP:
 	  break;
 	default:
 	  gcc_unreachable ();
@@ -1787,16 +2418,21 @@ static void
 handle_builtin_strcat (enum built_in_function bcode, gimple_stmt_iterator *gsi)
 {
   int idx, didx;
-  tree src, dst, srclen, dstlen, len, lhs, args, type, fn, objsz, endptr;
+  tree srclen, args, type, fn, objsz, endptr;
   bool success;
   gimple *stmt = gsi_stmt (*gsi);
   strinfo *si, *dsi;
-  location_t loc;
-  bool with_bounds = gimple_call_with_bounds_p (stmt);
+  location_t loc = gimple_location (stmt);
 
-  src = gimple_call_arg (stmt, with_bounds ? 2 : 1);
-  dst = gimple_call_arg (stmt, 0);
-  lhs = gimple_call_lhs (stmt);
+  tree src = gimple_call_arg (stmt, 1);
+  tree dst = gimple_call_arg (stmt, 0);
+
+  /* Bail if the source is the same as destination.  It will be diagnosed
+     elsewhere.  */
+  if (operand_equal_p (src, dst, 0))
+    return;
+
+  tree lhs = gimple_call_lhs (stmt);
 
   didx = get_stridx (dst);
   if (didx < 0)
@@ -1805,10 +2441,47 @@ handle_builtin_strcat (enum built_in_function bcode, gimple_stmt_iterator *gsi)
   dsi = NULL;
   if (didx > 0)
     dsi = get_strinfo (didx);
+
+  srclen = NULL_TREE;
+  si = NULL;
+  idx = get_stridx (src);
+  if (idx < 0)
+    srclen = build_int_cst (size_type_node, ~idx);
+  else if (idx > 0)
+    {
+      si = get_strinfo (idx);
+      if (si != NULL)
+	srclen = get_string_length (si);
+    }
+
+  /* Set the no-warning bit on the transformed statement?  */
+  bool set_no_warning = false;
+
   if (dsi == NULL || get_string_length (dsi) == NULL_TREE)
     {
+      {
+	  /* The concatenation always involves copying at least one byte
+	     (the terminating nul), even if the source string is empty.
+	     If the source is unknown assume it's one character long and
+	     used that as both sizes.  */
+	tree slen = srclen;
+	if (slen)
+	  {
+	    tree type = TREE_TYPE (slen);
+	    slen = fold_build2 (PLUS_EXPR, type, slen, build_int_cst (type, 1));
+	  }
+
+	tree sptr = si && si->ptr ? si->ptr : src;
+
+	if (!check_bounds_or_overlap (stmt, dst, sptr, NULL_TREE, slen))
+	  {
+	    gimple_set_no_warning (stmt, true);
+	    set_no_warning = true;
+	  }
+      }
+
       /* strcat (p, q) can be transformed into
-	 tmp = p + strlen (p); endptr = strpcpy (tmp, q);
+	 tmp = p + strlen (p); endptr = stpcpy (tmp, q);
 	 with length endptr - p if we need to compute the length
 	 later on.  Don't do this transformation if we don't need
 	 it.  */
@@ -1841,20 +2514,7 @@ handle_builtin_strcat (enum built_in_function bcode, gimple_stmt_iterator *gsi)
       return;
     }
 
-  srclen = NULL_TREE;
-  si = NULL;
-  idx = get_stridx (src);
-  if (idx < 0)
-    srclen = build_int_cst (size_type_node, ~idx);
-  else if (idx > 0)
-    {
-      si = get_strinfo (idx);
-      if (si != NULL)
-	srclen = get_string_length (si);
-    }
-
-  loc = gimple_location (stmt);
-  dstlen = dsi->nonzero_chars;
+  tree dstlen = dsi->nonzero_chars;
   endptr = dsi->endptr;
 
   dsi = unshare_strinfo (dsi);
@@ -1894,19 +2554,17 @@ handle_builtin_strcat (enum built_in_function bcode, gimple_stmt_iterator *gsi)
   switch (bcode)
     {
     case BUILT_IN_STRCAT:
-    case BUILT_IN_STRCAT_CHKP:
       if (srclen != NULL_TREE)
 	fn = builtin_decl_implicit (BUILT_IN_MEMCPY);
       else
 	fn = builtin_decl_implicit (BUILT_IN_STRCPY);
       break;
     case BUILT_IN_STRCAT_CHK:
-    case BUILT_IN_STRCAT_CHK_CHKP:
       if (srclen != NULL_TREE)
 	fn = builtin_decl_explicit (BUILT_IN_MEMCPY_CHK);
       else
 	fn = builtin_decl_explicit (BUILT_IN_STRCPY_CHK);
-      objsz = gimple_call_arg (stmt, with_bounds ? 4 : 2);
+      objsz = gimple_call_arg (stmt, 2);
       break;
     default:
       gcc_unreachable ();
@@ -1915,7 +2573,24 @@ handle_builtin_strcat (enum built_in_function bcode, gimple_stmt_iterator *gsi)
   if (fn == NULL_TREE)
     return;
 
-  len = NULL_TREE;
+  if (dsi && dstlen)
+    {
+      tree type = TREE_TYPE (dstlen);
+
+      /* Compute the size of the source sequence, including the nul.  */
+      tree srcsize = srclen ? srclen : size_zero_node;
+      srcsize = fold_build2 (PLUS_EXPR, type, srcsize, build_int_cst (type, 1));
+
+      tree sptr = si && si->ptr ? si->ptr : src;
+
+      if (!check_bounds_or_overlap (stmt, dst, sptr, dstlen, srcsize))
+	{
+	  gimple_set_no_warning (stmt, true);
+	  set_no_warning = true;
+	}
+    }
+
+  tree len = NULL_TREE;
   if (srclen != NULL_TREE)
     {
       args = TYPE_ARG_TYPES (TREE_TYPE (fn));
@@ -1941,35 +2616,15 @@ handle_builtin_strcat (enum built_in_function bcode, gimple_stmt_iterator *gsi)
       fprintf (dump_file, "Optimizing: ");
       print_gimple_stmt (dump_file, stmt, 0, TDF_SLIM);
     }
-  if (with_bounds)
-    {
-      fn = chkp_maybe_create_clone (fn)->decl;
-      if (srclen != NULL_TREE)
-	success = update_gimple_call (gsi, fn, 5 + (objsz != NULL_TREE),
-				      dst,
-				      gimple_call_arg (stmt, 1),
-				      src,
-				      gimple_call_arg (stmt, 3),
-				      len, objsz);
-      else
-	success = update_gimple_call (gsi, fn, 4 + (objsz != NULL_TREE),
-				      dst,
-				      gimple_call_arg (stmt, 1),
-				      src,
-				      gimple_call_arg (stmt, 3),
-				      objsz);
-    }
+  if (srclen != NULL_TREE)
+    success = update_gimple_call (gsi, fn, 3 + (objsz != NULL_TREE),
+				  dst, src, len, objsz);
   else
-    if (srclen != NULL_TREE)
-      success = update_gimple_call (gsi, fn, 3 + (objsz != NULL_TREE),
-				    dst, src, len, objsz);
-    else
-      success = update_gimple_call (gsi, fn, 2 + (objsz != NULL_TREE),
-				    dst, src, objsz);
+    success = update_gimple_call (gsi, fn, 2 + (objsz != NULL_TREE),
+				  dst, src, objsz);
   if (success)
     {
       stmt = gsi_stmt (*gsi);
-      gimple_call_set_with_bounds (stmt, with_bounds);
       update_stmt (stmt);
       if (dump_file && (dump_flags & TDF_DETAILS) != 0)
 	{
@@ -1990,6 +2645,9 @@ handle_builtin_strcat (enum built_in_function bcode, gimple_stmt_iterator *gsi)
     }
   else if (dump_file && (dump_flags & TDF_DETAILS) != 0)
     fprintf (dump_file, "not possible.\n");
+
+  if (set_no_warning)
+    gimple_set_no_warning (stmt, true);
 }
 
 /* Handle a call to malloc or calloc.  */
@@ -2018,27 +2676,28 @@ handle_builtin_malloc (enum built_in_function bcode, gimple_stmt_iterator *gsi)
 
 /* Handle a call to memset.
    After a call to calloc, memset(,0,) is unnecessary.
-   memset(malloc(n),0,n) is calloc(n,1).  */
+   memset(malloc(n),0,n) is calloc(n,1). 
+   return true when the call is transfomred, false otherwise.  */
 
 static bool
 handle_builtin_memset (gimple_stmt_iterator *gsi)
 {
   gimple *stmt2 = gsi_stmt (*gsi);
   if (!integer_zerop (gimple_call_arg (stmt2, 1)))
-    return true;
+    return false;
   tree ptr = gimple_call_arg (stmt2, 0);
   int idx1 = get_stridx (ptr);
   if (idx1 <= 0)
-    return true;
+    return false;
   strinfo *si1 = get_strinfo (idx1);
   if (!si1)
-    return true;
+    return false;
   gimple *stmt1 = si1->stmt;
   if (!stmt1 || !is_gimple_call (stmt1))
-    return true;
+    return false;
   tree callee1 = gimple_call_fndecl (stmt1);
   if (!valid_builtin_call (stmt1))
-    return true;
+    return false;
   enum built_in_function code1 = DECL_FUNCTION_CODE (callee1);
   tree size = gimple_call_arg (stmt2, 2);
   if (code1 == BUILT_IN_CALLOC)
@@ -2054,7 +2713,7 @@ handle_builtin_memset (gimple_stmt_iterator *gsi)
       si1->stmt = gsi_stmt (gsi1);
     }
   else
-    return true;
+    return false;
   tree lhs = gimple_call_lhs (stmt2);
   unlink_stmt_vdef (stmt2);
   if (lhs)
@@ -2068,12 +2727,13 @@ handle_builtin_memset (gimple_stmt_iterator *gsi)
       release_defs (stmt2);
     }
 
-  return false;
+  return true;
 }
 
 /* Handle a call to memcmp.  We try to handle small comparisons by
    converting them to load and compare, and replacing the call to memcmp
-   with a __builtin_memcmp_eq call where possible.  */
+   with a __builtin_memcmp_eq call where possible. 
+   return true when call is transformed, return false otherwise.  */
 
 static bool
 handle_builtin_memcmp (gimple_stmt_iterator *gsi)
@@ -2088,7 +2748,7 @@ handle_builtin_memcmp (gimple_stmt_iterator *gsi)
   imm_use_iterator iter;
 
   if (!res)
-    return true;
+    return false;
 
   FOR_EACH_IMM_USE_FAST (use_p, iter, res)
     {
@@ -2102,17 +2762,17 @@ handle_builtin_memcmp (gimple_stmt_iterator *gsi)
 	  tree_code code = gimple_assign_rhs_code (asgn);
 	  if ((code != EQ_EXPR && code != NE_EXPR)
 	      || !integer_zerop (gimple_assign_rhs2 (asgn)))
-	    return true;
+	    return false;
 	}
       else if (gimple_code (ustmt) == GIMPLE_COND)
 	{
 	  tree_code code = gimple_cond_code (ustmt);
 	  if ((code != EQ_EXPR && code != NE_EXPR)
 	      || !integer_zerop (gimple_cond_rhs (ustmt)))
-	    return true;
+	    return false;
 	}
       else
-	return true;
+	return false;
     }
 
   if (tree_fits_uhwi_p (len)
@@ -2130,7 +2790,7 @@ handle_builtin_memcmp (gimple_stmt_iterator *gsi)
 	  location_t loc = gimple_location (stmt2);
 	  tree type, off;
 	  type = build_nonstandard_integer_type (leni, 1);
-	  gcc_assert (GET_MODE_BITSIZE (TYPE_MODE (type)) == leni);
+	  gcc_assert (known_eq (GET_MODE_BITSIZE (TYPE_MODE (type)), leni));
 	  tree ptrtype = build_pointer_type_for_mode (char_type_node,
 						      ptr_mode, true);
 	  off = build_int_cst (ptrtype, 0);
@@ -2147,12 +2807,274 @@ handle_builtin_memcmp (gimple_stmt_iterator *gsi)
 						   boolean_type_node,
 						   arg1, arg2));
 	  gimplify_and_update_call_from_tree (gsi, res);
-	  return false;
+	  return true;
 	}
     }
 
   gimple_call_set_fndecl (stmt2, builtin_decl_explicit (BUILT_IN_MEMCMP_EQ));
-  return false;
+  return true;
+}
+
+/* Given an index to the strinfo vector, compute the string length for the
+   corresponding string. Return -1 when unknown.  */
+ 
+static HOST_WIDE_INT 
+compute_string_length (int idx)
+{
+  HOST_WIDE_INT string_leni = -1; 
+  gcc_assert (idx != 0);
+
+  if (idx < 0)
+   return ~idx;
+
+  strinfo *si = get_strinfo (idx);
+  if (si)
+    {
+      tree const_string_len = get_string_length (si);
+      if (const_string_len && tree_fits_shwi_p (const_string_len))
+	string_leni = tree_to_shwi (const_string_len);
+    }
+
+  if (string_leni < 0)
+    return -1;
+
+  return string_leni;
+}
+
+/* Determine the minimum size of the object referenced by DEST expression which
+   must have a pointer type. 
+   Return the minimum size of the object if successful or NULL when the size 
+   cannot be determined.  */
+static tree
+determine_min_objsize (tree dest)
+{
+  unsigned HOST_WIDE_INT size = 0;
+
+  if (compute_builtin_object_size (dest, 2, &size))
+    return build_int_cst (sizetype, size);
+
+  /* Try to determine the size of the object through the RHS of the 
+     assign statement.  */
+  if (TREE_CODE (dest) == SSA_NAME)
+    {
+      gimple *stmt = SSA_NAME_DEF_STMT (dest);
+      if (!is_gimple_assign (stmt))
+	return NULL_TREE;
+
+      if (!gimple_assign_single_p (stmt)
+	  && !gimple_assign_unary_nop_p (stmt))
+	return NULL_TREE;
+
+      dest = gimple_assign_rhs1 (stmt);
+      return determine_min_objsize (dest);
+    }
+
+  /* Try to determine the size of the object from its type.  */
+  if (TREE_CODE (dest) != ADDR_EXPR)
+    return NULL_TREE;
+
+  tree type = TREE_TYPE (dest);
+  if (TREE_CODE (type) == POINTER_TYPE)
+    type = TREE_TYPE (type);
+
+  type = TYPE_MAIN_VARIANT (type);
+
+  /* We cannot determine the size of the array if it's a flexible array, 
+     which is declared at the end of a structure.  */
+  if (TREE_CODE (type) == ARRAY_TYPE
+      && !array_at_struct_end_p (dest))
+    {
+      tree size_t = TYPE_SIZE_UNIT (type);
+      if (size_t && TREE_CODE (size_t) == INTEGER_CST 
+	  && !integer_zerop (size_t))
+        return size_t;
+    }
+
+  return NULL_TREE;
+}
+
+/* Handle a call to strcmp or strncmp. When the result is ONLY used to do 
+   equality test against zero:
+
+   A. When the lengths of both arguments are constant and it's a strcmp:
+      * if the lengths are NOT equal, we can safely fold the call
+        to a non-zero value.
+      * otherwise, do nothing now.
+  
+   B. When the length of one argument is constant, try to replace the call with
+   a __builtin_str(n)cmp_eq call where possible, i.e:
+
+   strncmp (s, STR, C) (!)= 0 in which, s is a pointer to a string, STR is a 
+   string with constant length , C is a constant.
+     if (C <= strlen(STR) && sizeof_array(s) > C)
+       {
+         replace this call with
+         strncmp_eq (s, STR, C) (!)= 0
+       }
+     if (C > strlen(STR)
+       {
+         it can be safely treated as a call to strcmp (s, STR) (!)= 0
+         can handled by the following strcmp.
+       }
+
+   strcmp (s, STR) (!)= 0 in which, s is a pointer to a string, STR is a 
+   string with constant length.
+     if  (sizeof_array(s) > strlen(STR))
+       {
+         replace this call with
+         strcmp_eq (s, STR, strlen(STR)+1) (!)= 0
+       }
+
+   Return true when the call is transformed, return false otherwise. 
+ */ 
+
+static bool
+handle_builtin_string_cmp (gimple_stmt_iterator *gsi)
+{
+  gcall *stmt = as_a <gcall *> (gsi_stmt (*gsi));
+  tree res = gimple_call_lhs (stmt);
+  use_operand_p use_p;
+  imm_use_iterator iter;
+  tree arg1 = gimple_call_arg (stmt, 0);
+  tree arg2 = gimple_call_arg (stmt, 1);
+  int idx1 = get_stridx (arg1);
+  int idx2 = get_stridx (arg2);
+  HOST_WIDE_INT length = -1;
+  bool is_ncmp = false;
+
+  if (!res)
+    return false;
+
+  /* When both arguments are unknown, do nothing.  */
+  if (idx1 == 0 && idx2 == 0)
+    return false;
+
+  /* Handle strncmp function.  */
+  if (gimple_call_num_args (stmt) == 3)
+    {
+      tree len = gimple_call_arg (stmt, 2);
+      if (tree_fits_shwi_p (len))
+        length = tree_to_shwi (len);
+
+      is_ncmp = true;
+    }
+
+  /* For strncmp, if the length argument is NOT known, do nothing.  */
+  if (is_ncmp && length < 0)
+    return false;
+
+  /* When the result is ONLY used to do equality test against zero.  */
+  FOR_EACH_IMM_USE_FAST (use_p, iter, res) 
+    {    
+      gimple *use_stmt = USE_STMT (use_p);
+
+      if (is_gimple_debug (use_stmt))
+        continue;
+      if (gimple_code (use_stmt) == GIMPLE_ASSIGN)
+	{    
+	  tree_code code = gimple_assign_rhs_code (use_stmt);
+	  if (code == COND_EXPR) 
+	    {
+	      tree cond_expr = gimple_assign_rhs1 (use_stmt);
+	      if ((TREE_CODE (cond_expr) != EQ_EXPR 
+		   && (TREE_CODE (cond_expr) != NE_EXPR))
+		  || !integer_zerop (TREE_OPERAND (cond_expr, 1)))
+		return false;
+	    }
+	  else if (code == EQ_EXPR || code == NE_EXPR)
+	    {
+	      if (!integer_zerop (gimple_assign_rhs2 (use_stmt)))
+		return false;
+            }
+	  else 
+	    return false;
+	}
+      else if (gimple_code (use_stmt) == GIMPLE_COND)
+	{
+	  tree_code code = gimple_cond_code (use_stmt);
+	  if ((code != EQ_EXPR && code != NE_EXPR)
+	      || !integer_zerop (gimple_cond_rhs (use_stmt)))
+	    return false;
+	}
+      else
+        return false;
+    }
+  
+  /* When the lengths of both arguments are known, and they are unequal, we can 
+     safely fold the call to a non-zero value for strcmp;
+     othewise, do nothing now.  */
+  if (idx1 != 0 && idx2 != 0)
+    {
+      HOST_WIDE_INT const_string_leni1 = compute_string_length (idx1);
+      HOST_WIDE_INT const_string_leni2 = compute_string_length (idx2);
+
+      if (!is_ncmp 
+	  && const_string_leni1 != -1
+	  && const_string_leni2 != -1
+	  && const_string_leni1 != const_string_leni2) 
+	{
+	  replace_call_with_value (gsi, integer_one_node); 
+	  return true;
+	}
+      return false;
+    }
+
+  /* When the length of one argument is constant.  */
+  tree var_string = NULL_TREE;
+  HOST_WIDE_INT const_string_leni = -1;
+  
+  if (idx1)
+    {
+      const_string_leni = compute_string_length (idx1);
+      var_string = arg2;
+    } 
+  else 
+    {
+      gcc_checking_assert (idx2);
+      const_string_leni = compute_string_length (idx2);
+      var_string = arg1;
+    } 
+
+  if (const_string_leni < 0) 
+    return false;
+ 
+  unsigned HOST_WIDE_INT var_sizei = 0;
+  /* try to determine the minimum size of the object pointed by var_string.  */
+  tree size = determine_min_objsize (var_string);
+
+  if (!size)
+    return false;
+ 
+  if (tree_fits_uhwi_p (size))
+    var_sizei = tree_to_uhwi (size);
+
+  if (var_sizei == 0)
+    return false;
+
+  /* For strncmp, if length > const_string_leni , this call can be safely 
+     transformed to a strcmp.  */
+  if (is_ncmp && length > const_string_leni)
+    is_ncmp = false;
+
+  unsigned HOST_WIDE_INT final_length 
+    = is_ncmp ? length : const_string_leni + 1;
+
+  /* Replace strcmp or strncmp with the corresponding str(n)cmp_eq.  */
+  if (var_sizei > final_length) 
+    {
+      tree fn 
+	= (is_ncmp 
+	   ? builtin_decl_implicit (BUILT_IN_STRNCMP_EQ) 
+	   : builtin_decl_implicit (BUILT_IN_STRCMP_EQ));
+      if (!fn)
+	return false;
+      tree const_string_len = build_int_cst (size_type_node, final_length); 
+      update_gimple_call (gsi, fn, 3, arg1, arg2, const_string_len);
+    }
+  else 
+    return false;
+
+  return true;
 }
 
 /* Handle a POINTER_PLUS_EXPR statement.
@@ -2212,7 +3134,68 @@ handle_pointer_plus (gimple_stmt_iterator *gsi)
     }
 }
 
-/* Handle a single character store.  */
+/* If RHS, either directly or indirectly, refers to a string of constant
+   length, return the length.  Otherwise, if it refers to a character
+   constant, return 1 if the constant is non-zero and 0 if it is nul.
+   Otherwise, return a negative value.  */
+
+static HOST_WIDE_INT
+get_min_string_length (tree rhs, bool *full_string_p)
+{
+  if (INTEGRAL_TYPE_P (TREE_TYPE (rhs)))
+    {
+      if (tree_expr_nonzero_p (rhs))
+	{
+	  *full_string_p = false;
+	  return 1;
+	}
+
+      *full_string_p = true;
+      return 0;
+    }
+
+  if (TREE_CODE (rhs) == MEM_REF
+      && integer_zerop (TREE_OPERAND (rhs, 1)))
+    {
+      rhs = TREE_OPERAND (rhs, 0);
+      if (TREE_CODE (rhs) == ADDR_EXPR)
+	{
+	  tree rhs_addr = rhs;
+
+	  rhs = TREE_OPERAND (rhs, 0);
+	  if (TREE_CODE (rhs) != STRING_CST)
+	    {
+	      int idx = get_stridx (rhs_addr);
+	      if (idx > 0)
+		{
+		  strinfo *si = get_strinfo (idx);
+		  if (si
+		      && tree_fits_shwi_p (si->nonzero_chars))
+		    {
+		      *full_string_p = si->full_string_p;
+		      return tree_to_shwi (si->nonzero_chars);
+		    }
+		}
+	    }
+	}
+    }
+
+  if (TREE_CODE (rhs) == VAR_DECL
+      && TREE_READONLY (rhs))
+    rhs = DECL_INITIAL (rhs);
+
+  if (rhs && TREE_CODE (rhs) == STRING_CST)
+    {
+      *full_string_p = true;
+      return strlen (TREE_STRING_POINTER (rhs));
+    }
+
+  return -1;
+}
+
+/* Handle a single or multiple character store either by single
+   character assignment or by multi-character assignment from
+   MEM_REF.  */
 
 static bool
 handle_char_store (gimple_stmt_iterator *gsi)
@@ -2250,16 +3233,23 @@ handle_char_store (gimple_stmt_iterator *gsi)
 	si = get_strinfo (idx);
     }
 
-  bool storing_zero_p = initializer_zerop (rhs);
-  bool storing_nonzero_p = (!storing_zero_p
-			    && TREE_CODE (rhs) == INTEGER_CST
-			    && integer_nonzerop (rhs));
+  /* STORING_NONZERO_P is true iff not all stored characters are zero.
+     STORING_ALL_ZEROS_P is true iff all stored characters are zero.
+     Both are false when it's impossible to determine which is true.  */
+  bool storing_nonzero_p;
+  bool storing_all_zeros_p = initializer_zerop (rhs, &storing_nonzero_p);
+  if (!storing_nonzero_p)
+    storing_nonzero_p = tree_expr_nonzero_p (rhs);
+  bool full_string_p = storing_all_zeros_p;
+
+  /* Set to the length of the string being assigned if known.  */
+  HOST_WIDE_INT rhslen;
 
   if (si != NULL)
     {
       int cmp = compare_nonzero_chars (si, offset);
       gcc_assert (offset == 0 || cmp >= 0);
-      if (storing_zero_p && cmp == 0 && si->full_string_p)
+      if (storing_all_zeros_p && cmp == 0 && si->full_string_p)
 	{
 	  /* When overwriting a '\0' with a '\0', the store can be removed
 	     if we know it has been stored in the current function.  */
@@ -2302,17 +3292,32 @@ handle_char_store (gimple_stmt_iterator *gsi)
 	  gsi_next (gsi);
 	  return false;
 	}
-      else if (storing_zero_p || storing_nonzero_p || (offset != 0 && cmp > 0))
+      else if (storing_all_zeros_p || storing_nonzero_p || (offset != 0 && cmp > 0))
 	{
-	  /* When storing_nonzero_p, we know that the string now starts
-	     with OFFSET + 1 nonzero characters, but don't know whether
-	     there's a following nul terminator.
+	  /* When STORING_NONZERO_P, we know that the string will start
+	     with at least OFFSET + 1 nonzero characters.  If storing
+	     a single character, set si->NONZERO_CHARS to the result.
+	     If storing multiple characters, try to determine the number
+	     of leading non-zero characters and set si->NONZERO_CHARS to
+	     the result instead.
 
-	     When storing_zero_p, we know that the string is now OFFSET
-	     characters long.
+	     When STORING_ALL_ZEROS_P, we know that the string is now
+	     OFFSET characters long.
 
 	     Otherwise, we're storing an unknown value at offset OFFSET,
 	     so need to clip the nonzero_chars to OFFSET.  */
+	  bool full_string_p = storing_all_zeros_p;
+	  HOST_WIDE_INT len = 1;
+	  if (storing_nonzero_p)
+	    {
+	      /* Try to get the minimum length of the string (or
+		 individual character) being stored.  If it fails,
+		 STORING_NONZERO_P guarantees it's at least 1.  */
+	      len = get_min_string_length (rhs, &full_string_p);
+	      if (len < 0)
+		len = 1;
+	    }
+
 	  location_t loc = gimple_location (stmt);
 	  tree oldlen = si->nonzero_chars;
 	  if (cmp == 0 && si->full_string_p)
@@ -2322,11 +3327,14 @@ handle_char_store (gimple_stmt_iterator *gsi)
 	    adjust_last_stmt (si, stmt, false);
 	  si = unshare_strinfo (si);
 	  if (storing_nonzero_p)
-	    si->nonzero_chars = build_int_cst (size_type_node, offset + 1);
+	    {
+	      gcc_assert (len >= 0);
+	      si->nonzero_chars = build_int_cst (size_type_node, offset + len);
+	    }
 	  else
 	    si->nonzero_chars = build_int_cst (size_type_node, offset);
-	  si->full_string_p = storing_zero_p;
-	  if (storing_zero_p
+	  si->full_string_p = full_string_p;
+	  if (storing_all_zeros_p
 	      && ssaname
 	      && !SSA_NAME_OCCURS_IN_ABNORMAL_PHI (ssaname))
 	    si->endptr = ssaname;
@@ -2346,7 +3354,7 @@ handle_char_store (gimple_stmt_iterator *gsi)
 	    si->prev = 0;
 	}
     }
-  else if (idx == 0 && (storing_zero_p || storing_nonzero_p))
+  else if (idx == 0 && (storing_all_zeros_p || storing_nonzero_p))
     {
       if (ssaname)
 	idx = new_stridx (ssaname);
@@ -2355,10 +3363,17 @@ handle_char_store (gimple_stmt_iterator *gsi)
       if (idx != 0)
 	{
 	  tree ptr = (ssaname ? ssaname : build_fold_addr_expr (lhs));
-	  tree len = storing_nonzero_p ? size_one_node : size_zero_node;
-	  si = new_strinfo (ptr, idx, len, storing_zero_p);
+	  HOST_WIDE_INT slen = (storing_all_zeros_p
+				? 0
+				: (storing_nonzero_p
+				   ? get_min_string_length (rhs, &full_string_p)
+				   : -1));
+	  tree len = (slen <= 0
+		      ? size_zero_node
+		      : build_int_cst (size_type_node, slen));
+	  si = new_strinfo (ptr, idx, len, slen >= 0 && full_string_p);
 	  set_strinfo (idx, si);
-	  if (storing_zero_p
+	  if (storing_all_zeros_p
 	      && ssaname
 	      && !SSA_NAME_OCCURS_IN_ABNORMAL_PHI (ssaname))
 	    si->endptr = ssaname;
@@ -2367,26 +3382,26 @@ handle_char_store (gimple_stmt_iterator *gsi)
 	}
     }
   else if (idx == 0
-	   && TREE_CODE (gimple_assign_rhs1 (stmt)) == STRING_CST
+	   && (rhslen = get_min_string_length (rhs, &full_string_p)) >= 0
 	   && ssaname == NULL_TREE
 	   && TREE_CODE (TREE_TYPE (lhs)) == ARRAY_TYPE)
     {
-      size_t l = strlen (TREE_STRING_POINTER (gimple_assign_rhs1 (stmt)));
       HOST_WIDE_INT a = int_size_in_bytes (TREE_TYPE (lhs));
-      if (a > 0 && (unsigned HOST_WIDE_INT) a > l)
+      if (a > 0 && (unsigned HOST_WIDE_INT) a > (unsigned HOST_WIDE_INT) rhslen)
 	{
 	  int idx = new_addr_stridx (lhs);
 	  if (idx != 0)
 	    {
 	      si = new_strinfo (build_fold_addr_expr (lhs), idx,
-				build_int_cst (size_type_node, l), true);
+				build_int_cst (size_type_node, rhslen),
+				full_string_p);
 	      set_strinfo (idx, si);
 	      si->dont_invalidate = true;
 	    }
 	}
     }
 
-  if (si != NULL && offset == 0 && storing_zero_p)
+  if (si != NULL && offset == 0 && storing_all_zeros_p)
     {
       /* Allow adjust_last_stmt to remove it if the stored '\0'
 	 is immediately overwritten.  */
@@ -2446,6 +3461,16 @@ fold_strstr_to_strncmp (tree rhs1, tree rhs2, gimple *stmt)
 	    {
 	      gimple_stmt_iterator gsi = gsi_for_stmt (call_stmt);
 	      tree strncmp_decl = builtin_decl_explicit (BUILT_IN_STRNCMP);
+
+	      if (!is_gimple_val (arg1_len))
+		{
+		  tree arg1_len_tmp = make_ssa_name (TREE_TYPE (arg1_len));
+		  gassign *arg1_stmt = gimple_build_assign (arg1_len_tmp,
+							    arg1_len);
+		  gsi_insert_before (&gsi, arg1_stmt, GSI_SAME_STMT);
+		  arg1_len = arg1_len_tmp;
+		}
+
 	      gcall *strncmp_call = gimple_build_call (strncmp_decl, 3,
 						      arg0, arg1, arg1_len);
 	      tree strncmp_lhs = make_ssa_name (integer_type_node);
@@ -2481,11 +3506,13 @@ fold_strstr_to_strncmp (tree rhs1, tree rhs2, gimple *stmt)
     }
 }
 
-/* Attempt to optimize a single statement at *GSI using string length
-   knowledge.  */
+/* Attempt to check for validity of the performed access a single statement
+   at *GSI using string length knowledge, and to optimize it.
+   If the given basic block needs clean-up of EH, CLEANUP_EH is set to
+   true.  */
 
 static bool
-strlen_optimize_stmt (gimple_stmt_iterator *gsi)
+strlen_check_and_optimize_stmt (gimple_stmt_iterator *gsi, bool *cleanup_eh)
 {
   gimple *stmt = gsi_stmt (*gsi);
 
@@ -2496,37 +3523,39 @@ strlen_optimize_stmt (gimple_stmt_iterator *gsi)
 	switch (DECL_FUNCTION_CODE (callee))
 	  {
 	  case BUILT_IN_STRLEN:
-	  case BUILT_IN_STRLEN_CHKP:
+	  case BUILT_IN_STRNLEN:
 	    handle_builtin_strlen (gsi);
 	    break;
 	  case BUILT_IN_STRCHR:
-	  case BUILT_IN_STRCHR_CHKP:
 	    handle_builtin_strchr (gsi);
 	    break;
 	  case BUILT_IN_STRCPY:
 	  case BUILT_IN_STRCPY_CHK:
 	  case BUILT_IN_STPCPY:
 	  case BUILT_IN_STPCPY_CHK:
-	  case BUILT_IN_STRCPY_CHKP:
-	  case BUILT_IN_STRCPY_CHK_CHKP:
-	  case BUILT_IN_STPCPY_CHKP:
-	  case BUILT_IN_STPCPY_CHK_CHKP:
 	    handle_builtin_strcpy (DECL_FUNCTION_CODE (callee), gsi);
 	    break;
+
+	  case BUILT_IN_STRNCAT:
+	  case BUILT_IN_STRNCAT_CHK:
+	    handle_builtin_strncat (DECL_FUNCTION_CODE (callee), gsi);
+	    break;
+
+	  case BUILT_IN_STPNCPY:
+	  case BUILT_IN_STPNCPY_CHK:
+	  case BUILT_IN_STRNCPY:
+	  case BUILT_IN_STRNCPY_CHK:
+	    handle_builtin_stxncpy (DECL_FUNCTION_CODE (callee), gsi);
+	    break;
+
 	  case BUILT_IN_MEMCPY:
 	  case BUILT_IN_MEMCPY_CHK:
 	  case BUILT_IN_MEMPCPY:
 	  case BUILT_IN_MEMPCPY_CHK:
-	  case BUILT_IN_MEMCPY_CHKP:
-	  case BUILT_IN_MEMCPY_CHK_CHKP:
-	  case BUILT_IN_MEMPCPY_CHKP:
-	  case BUILT_IN_MEMPCPY_CHK_CHKP:
 	    handle_builtin_memcpy (DECL_FUNCTION_CODE (callee), gsi);
 	    break;
 	  case BUILT_IN_STRCAT:
 	  case BUILT_IN_STRCAT_CHK:
-	  case BUILT_IN_STRCAT_CHKP:
-	  case BUILT_IN_STRCAT_CHK_CHKP:
 	    handle_builtin_strcat (DECL_FUNCTION_CODE (callee), gsi);
 	    break;
 	  case BUILT_IN_MALLOC:
@@ -2534,11 +3563,16 @@ strlen_optimize_stmt (gimple_stmt_iterator *gsi)
 	    handle_builtin_malloc (DECL_FUNCTION_CODE (callee), gsi);
 	    break;
 	  case BUILT_IN_MEMSET:
-	    if (!handle_builtin_memset (gsi))
+	    if (handle_builtin_memset (gsi))
 	      return false;
 	    break;
 	  case BUILT_IN_MEMCMP:
-	    if (!handle_builtin_memcmp (gsi))
+	    if (handle_builtin_memcmp (gsi))
+	      return false;
+	    break;
+	  case BUILT_IN_STRCMP:
+	  case BUILT_IN_STRNCMP:
+	    if (handle_builtin_string_cmp (gsi))
 	      return false;
 	    break;
 	  default:
@@ -2576,6 +3610,100 @@ strlen_optimize_stmt (gimple_stmt_iterator *gsi)
 	else if (code == EQ_EXPR || code == NE_EXPR)
 	  fold_strstr_to_strncmp (gimple_assign_rhs1 (stmt),
 				  gimple_assign_rhs2 (stmt), stmt);
+	else if (gimple_assign_load_p (stmt)
+		 && TREE_CODE (TREE_TYPE (lhs)) == INTEGER_TYPE
+		 && TYPE_MODE (TREE_TYPE (lhs)) == TYPE_MODE (char_type_node)
+		 && (TYPE_PRECISION (TREE_TYPE (lhs))
+		     == TYPE_PRECISION (char_type_node))
+		 && !gimple_has_volatile_ops (stmt))
+	  {
+	    tree off = integer_zero_node;
+	    unsigned HOST_WIDE_INT coff = 0;
+	    int idx = 0;
+	    tree rhs1 = gimple_assign_rhs1 (stmt);
+	    if (code == MEM_REF)
+	      {
+		idx = get_stridx (TREE_OPERAND (rhs1, 0));
+		if (idx > 0)
+		  {
+		    strinfo *si = get_strinfo (idx);
+		    if (si
+			&& si->nonzero_chars
+			&& TREE_CODE (si->nonzero_chars) == INTEGER_CST
+			&& (wi::to_widest (si->nonzero_chars)
+			    >= wi::to_widest (off)))
+		      off = TREE_OPERAND (rhs1, 1);
+		    else
+		      /* This case is not useful.  See if get_addr_stridx
+			 returns something usable.  */
+		      idx = 0;
+		  }
+	      }
+	    if (idx <= 0)
+	      idx = get_addr_stridx (rhs1, NULL_TREE, &coff);
+	    if (idx > 0)
+	      {
+		strinfo *si = get_strinfo (idx);
+		if (si
+		    && si->nonzero_chars
+		    && TREE_CODE (si->nonzero_chars) == INTEGER_CST)
+		  {
+		    widest_int w1 = wi::to_widest (si->nonzero_chars);
+		    widest_int w2 = wi::to_widest (off) + coff;
+		    if (w1 == w2
+			&& si->full_string_p)
+		      {
+			if (dump_file && (dump_flags & TDF_DETAILS) != 0)
+			  {
+			    fprintf (dump_file, "Optimizing: ");
+			    print_gimple_stmt (dump_file, stmt, 0, TDF_SLIM);
+			  }
+
+			/* Reading the final '\0' character.  */
+			tree zero = build_int_cst (TREE_TYPE (lhs), 0);
+			gimple_set_vuse (stmt, NULL_TREE);
+			gimple_assign_set_rhs_from_tree (gsi, zero);
+			*cleanup_eh
+			  |= maybe_clean_or_replace_eh_stmt (stmt,
+							     gsi_stmt (*gsi));
+			stmt = gsi_stmt (*gsi);
+			update_stmt (stmt);
+
+			if (dump_file && (dump_flags & TDF_DETAILS) != 0)
+			  {
+			    fprintf (dump_file, "into: ");
+			    print_gimple_stmt (dump_file, stmt, 0, TDF_SLIM);
+			  }
+		      }
+		    else if (w1 > w2)
+		      {
+			/* Reading a character before the final '\0'
+			   character.  Just set the value range to ~[0, 0]
+			   if we don't have anything better.  */
+			wide_int min, max;
+			tree type = TREE_TYPE (lhs);
+			enum value_range_kind vr
+			  = get_range_info (lhs, &min, &max);
+			if (vr == VR_VARYING
+			    || (vr == VR_RANGE
+				&& min == wi::min_value (TYPE_PRECISION (type),
+							 TYPE_SIGN (type))
+				&& max == wi::max_value (TYPE_PRECISION (type),
+							 TYPE_SIGN (type))))
+			  set_range_info (lhs, VR_ANTI_RANGE,
+					  wi::zero (TYPE_PRECISION (type)),
+					  wi::zero (TYPE_PRECISION (type)));
+		      }
+		  }
+	      }
+	  }
+
+	if (strlen_to_stridx)
+	  {
+	    tree rhs1 = gimple_assign_rhs1 (stmt);
+	    if (stridx_strlenloc *ps = strlen_to_stridx->get (rhs1))
+	      strlen_to_stridx->put (lhs, stridx_strlenloc (*ps));
+	  }
       }
     else if (TREE_CODE (lhs) != SSA_NAME && !TREE_SIDE_EFFECTS (lhs))
 	{
@@ -2658,10 +3786,16 @@ do_invalidate (basic_block dombb, gimple *phi, bitmap visited, int *count)
 class strlen_dom_walker : public dom_walker
 {
 public:
-  strlen_dom_walker (cdi_direction direction) : dom_walker (direction) {}
+  strlen_dom_walker (cdi_direction direction)
+    : dom_walker (direction), m_cleanup_cfg (false)
+  {}
 
   virtual edge before_dom_children (basic_block);
   virtual void after_dom_children (basic_block);
+
+  /* Flag that will trigger TODO_cleanup_cfg to be returned in strlen
+     execute function.  */
+  bool m_cleanup_cfg;
 };
 
 /* Callback for walk_dominator_tree.  Attempt to optimize various
@@ -2739,10 +3873,15 @@ strlen_dom_walker::before_dom_children (basic_block bb)
 	}
     }
 
+  bool cleanup_eh = false;
+
   /* Attempt to optimize individual statements.  */
   for (gimple_stmt_iterator gsi = gsi_start_bb (bb); !gsi_end_p (gsi); )
-    if (strlen_optimize_stmt (&gsi))
+    if (strlen_check_and_optimize_stmt (&gsi, &cleanup_eh))
       gsi_next (&gsi);
+
+  if (cleanup_eh && gimple_purge_dead_eh_edges (bb))
+      m_cleanup_cfg = true;
 
   bb->aux = stridx_to_strinfo;
   if (vec_safe_length (stridx_to_strinfo) && !strinfo_shared ())
@@ -2806,6 +3945,10 @@ public:
 unsigned int
 pass_strlen::execute (function *fun)
 {
+  gcc_assert (!strlen_to_stridx);
+  if (warn_stringop_overflow || warn_stringop_truncation)
+    strlen_to_stridx = new hash_map<tree, stridx_strlenloc> ();
+
   ssa_ver_to_stridx.safe_grow_cleared (num_ssa_names);
   max_stridx = 1;
 
@@ -2813,7 +3956,8 @@ pass_strlen::execute (function *fun)
 
   /* String length optimization is implemented as a walk of the dominator
      tree and a forward walk of statements within each block.  */
-  strlen_dom_walker (CDI_DOMINATORS).walk (fun->cfg->x_entry_block_ptr);
+  strlen_dom_walker walker (CDI_DOMINATORS);
+  walker.walk (fun->cfg->x_entry_block_ptr);
 
   ssa_ver_to_stridx.release ();
   strinfo_pool.release ();
@@ -2827,7 +3971,14 @@ pass_strlen::execute (function *fun)
   laststmt.len = NULL_TREE;
   laststmt.stridx = 0;
 
-  return 0;
+  if (strlen_to_stridx)
+    {
+      strlen_to_stridx->empty ();
+      delete strlen_to_stridx;
+      strlen_to_stridx = NULL;
+    }
+
+  return walker.m_cleanup_cfg ? TODO_cleanup_cfg : 0;
 }
 
 } // anon namespace

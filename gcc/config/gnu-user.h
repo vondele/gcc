@@ -1,7 +1,7 @@
 /* Definitions for systems using, at least optionally, a GNU
    (glibc-based) userspace or other userspace with libc derived from
    glibc (e.g. uClibc) or for which similar specs are appropriate.
-   Copyright (C) 1995-2017 Free Software Foundation, Inc.
+   Copyright (C) 1995-2018 Free Software Foundation, Inc.
    Contributed by Eric Youngdale.
    Modified for stabs-in-ELF by H.J. Lu (hjl@lucon.org).
 
@@ -26,9 +26,6 @@ a copy of the GCC Runtime Library Exception along with this program;
 see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
 <http://www.gnu.org/licenses/>.  */
 
-/* Don't assume anything about the header files.  */
-#define NO_IMPLICIT_EXTERN_C
-
 #undef ASM_APP_ON
 #define ASM_APP_ON "#APP\n"
 
@@ -51,9 +48,10 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
 #if defined HAVE_LD_PIE
 #define GNU_USER_TARGET_STARTFILE_SPEC \
   "%{shared:; \
-     pg|p|profile:gcrt1.o%s; \
+     pg|p|profile:%{static-pie:grcrt1.o%s;:gcrt1.o%s}; \
      static:crt1.o%s; \
-     static-pie|" PIE_SPEC ":Scrt1.o%s; \
+     static-pie:rcrt1.o%s; \
+     " PIE_SPEC ":Scrt1.o%s; \
      :crt1.o%s} \
    crti.o%s \
    %{static:crtbeginT.o%s; \
@@ -122,7 +120,7 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
 
 #define GNU_USER_TARGET_NO_PTHREADS_LIB_SPEC \
   "%{shared:-lc} \
-   %{!shared:%{mieee-fp:-lieee} %{profile:-lc_p}%{!profile:-lc}}"
+   %{!shared:%{profile:-lc_p}%{!profile:-lc}}"
 
 #define GNU_USER_TARGET_LIB_SPEC \
   "%{pthread:-lpthread} " \
@@ -137,7 +135,7 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
 
 #undef LINK_GCC_C_SEQUENCE_SPEC
 #define LINK_GCC_C_SEQUENCE_SPEC \
-  "%{static|static-pie:--start-group} %G %L \
+  "%{static|static-pie:--start-group} %G %{!nolibc:%L} \
    %{static|static-pie:--end-group}%{!static:%{!static-pie:%G}}"
 
 /* Use --as-needed -lgcc_s for eh support.  */
@@ -162,11 +160,13 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
   LD_STATIC_OPTION " --whole-archive -lasan --no-whole-archive " \
   LD_DYNAMIC_OPTION "}}%{!static-libasan:-lasan}"
 #undef LIBTSAN_EARLY_SPEC
-#define LIBTSAN_EARLY_SPEC "%{static-libtsan:%{!shared:" \
+#define LIBTSAN_EARLY_SPEC "%{!shared:libtsan_preinit%O%s} " \
+  "%{static-libtsan:%{!shared:" \
   LD_STATIC_OPTION " --whole-archive -ltsan --no-whole-archive " \
   LD_DYNAMIC_OPTION "}}%{!static-libtsan:-ltsan}"
 #undef LIBLSAN_EARLY_SPEC
-#define LIBLSAN_EARLY_SPEC "%{static-liblsan:%{!shared:" \
+#define LIBLSAN_EARLY_SPEC "%{!shared:liblsan_preinit%O%s} " \
+  "%{static-liblsan:%{!shared:" \
   LD_STATIC_OPTION " --whole-archive -llsan --no-whole-archive " \
   LD_DYNAMIC_OPTION "}}%{!static-liblsan:-llsan}"
 #endif

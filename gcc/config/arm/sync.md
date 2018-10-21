@@ -1,5 +1,5 @@
 ;; Machine description for ARM processor synchronization primitives.
-;; Copyright (C) 2010-2017 Free Software Foundation, Inc.
+;; Copyright (C) 2010-2018 Free Software Foundation, Inc.
 ;; Written by Marcus Shawcroft (marcus.shawcroft@arm.com)
 ;; 64bit Atomics by Dave Gilbert (david.gilbert@linaro.org)
 ;;
@@ -70,25 +70,23 @@
       VUNSPEC_LDA))]
   "TARGET_HAVE_LDACQ"
   {
-    enum memmodel model = memmodel_from_int (INTVAL (operands[2]));
-    if (is_mm_relaxed (model) || is_mm_consume (model) || is_mm_release (model))
+    if (aarch_mm_needs_acquire (operands[2]))
       {
 	if (TARGET_THUMB1)
-	  return \"ldr<sync_sfx>\\t%0, %1\";
+	  return "lda<sync_sfx>\t%0, %1";
 	else
-	  return \"ldr<sync_sfx>%?\\t%0, %1\";
+	  return "lda<sync_sfx>%?\t%0, %1";
       }
     else
       {
 	if (TARGET_THUMB1)
-	  return \"lda<sync_sfx>\\t%0, %1\";
+	  return "ldr<sync_sfx>\t%0, %1";
 	else
-	  return \"lda<sync_sfx>%?\\t%0, %1\";
+	  return "ldr<sync_sfx>%?\t%0, %1";
       }
   }
   [(set_attr "arch" "32,v8mb,any")
-   (set_attr "predicable" "yes")
-   (set_attr "predicable_short_it" "no")])
+   (set_attr "predicable" "yes")])
 
 (define_insn "atomic_store<mode>"
   [(set (match_operand:QHSI 0 "memory_operand" "=Q,Q,Q")
@@ -98,25 +96,23 @@
       VUNSPEC_STL))]
   "TARGET_HAVE_LDACQ"
   {
-    enum memmodel model = memmodel_from_int (INTVAL (operands[2]));
-    if (is_mm_relaxed (model) || is_mm_consume (model) || is_mm_acquire (model))
+    if (aarch_mm_needs_release (operands[2]))
       {
 	if (TARGET_THUMB1)
-	  return \"str<sync_sfx>\t%1, %0\";
+	  return "stl<sync_sfx>\t%1, %0";
 	else
-	  return \"str<sync_sfx>%?\t%1, %0\";
+	  return "stl<sync_sfx>%?\t%1, %0";
       }
     else
       {
 	if (TARGET_THUMB1)
-	  return \"stl<sync_sfx>\t%1, %0\";
+	  return "str<sync_sfx>\t%1, %0";
 	else
-	  return \"stl<sync_sfx>%?\t%1, %0\";
+	  return "str<sync_sfx>%?\t%1, %0";
       }
   }
   [(set_attr "arch" "32,v8mb,any")
-   (set_attr "predicable" "yes")
-   (set_attr "predicable_short_it" "no")])
+   (set_attr "predicable" "yes")])
 
 ;; An LDRD instruction usable by the atomic_loaddi expander on LPAE targets
 
@@ -127,8 +123,7 @@
 	    VUNSPEC_LDRD_ATOMIC))]
   "ARM_DOUBLEWORD_ALIGN && TARGET_HAVE_LPAE"
   "ldrd%?\t%0, %H0, %C1"
-  [(set_attr "predicable" "yes")
-   (set_attr "predicable_short_it" "no")])
+  [(set_attr "predicable" "yes")])
 
 ;; There are three ways to expand this depending on the architecture
 ;; features available.  As for the barriers, a load needs a barrier
@@ -461,8 +456,7 @@
    ldrex<sync_sfx>%?\t%0, %C1
    ldrex<sync_sfx>\t%0, %C1"
   [(set_attr "arch" "32,v8mb")
-   (set_attr "predicable" "yes")
-   (set_attr "predicable_short_it" "no")])
+   (set_attr "predicable" "yes")])
 
 (define_insn "arm_load_acquire_exclusive<mode>"
   [(set (match_operand:SI 0 "s_register_operand" "=r,r")
@@ -475,8 +469,7 @@
    ldaex<sync_sfx>%?\\t%0, %C1
    ldaex<sync_sfx>\\t%0, %C1"
   [(set_attr "arch" "32,v8mb")
-   (set_attr "predicable" "yes")
-   (set_attr "predicable_short_it" "no")])
+   (set_attr "predicable" "yes")])
 
 (define_insn "arm_load_exclusivesi"
   [(set (match_operand:SI 0 "s_register_operand" "=r,r")
@@ -488,8 +481,7 @@
    ldrex%?\t%0, %C1
    ldrex\t%0, %C1"
   [(set_attr "arch" "32,v8mb")
-   (set_attr "predicable" "yes")
-   (set_attr "predicable_short_it" "no")])
+   (set_attr "predicable" "yes")])
 
 (define_insn "arm_load_acquire_exclusivesi"
   [(set (match_operand:SI 0 "s_register_operand" "=r,r")
@@ -501,8 +493,7 @@
    ldaex%?\t%0, %C1
    ldaex\t%0, %C1"
   [(set_attr "arch" "32,v8mb")
-   (set_attr "predicable" "yes")
-   (set_attr "predicable_short_it" "no")])
+   (set_attr "predicable" "yes")])
 
 (define_insn "arm_load_exclusivedi"
   [(set (match_operand:DI 0 "s_register_operand" "=r")
@@ -511,8 +502,7 @@
 	  VUNSPEC_LL))]
   "TARGET_HAVE_LDREXD"
   "ldrexd%?\t%0, %H0, %C1"
-  [(set_attr "predicable" "yes")
-   (set_attr "predicable_short_it" "no")])
+  [(set_attr "predicable" "yes")])
 
 (define_insn "arm_load_acquire_exclusivedi"
   [(set (match_operand:DI 0 "s_register_operand" "=r")
@@ -521,8 +511,7 @@
 	  VUNSPEC_LAX))]
   "TARGET_HAVE_LDACQEXD && ARM_DOUBLEWORD_ALIGN"
   "ldaexd%?\t%0, %H0, %C1"
-  [(set_attr "predicable" "yes")
-   (set_attr "predicable_short_it" "no")])
+  [(set_attr "predicable" "yes")])
 
 (define_insn "arm_store_exclusive<mode>"
   [(set (match_operand:SI 0 "s_register_operand" "=&r")
@@ -548,8 +537,7 @@
     else
       return "strex<sync_sfx>%?\t%0, %2, %C1";
   }
-  [(set_attr "predicable" "yes")
-   (set_attr "predicable_short_it" "no")])
+  [(set_attr "predicable" "yes")])
 
 (define_insn "arm_store_release_exclusivedi"
   [(set (match_operand:SI 0 "s_register_operand" "=&r")
@@ -564,8 +552,7 @@
     gcc_assert ((REGNO (operands[2]) & 1) == 0 || TARGET_THUMB2);
     return "stlexd%?\t%0, %2, %H2, %C1";
   }
-  [(set_attr "predicable" "yes")
-   (set_attr "predicable_short_it" "no")])
+  [(set_attr "predicable" "yes")])
 
 (define_insn "arm_store_release_exclusive<mode>"
   [(set (match_operand:SI 0 "s_register_operand" "=&r,&r")
@@ -579,5 +566,4 @@
    stlex<sync_sfx>%?\t%0, %2, %C1
    stlex<sync_sfx>\t%0, %2, %C1"
   [(set_attr "arch" "32,v8mb")
-   (set_attr "predicable" "yes")
-   (set_attr "predicable_short_it" "no")])
+   (set_attr "predicable" "yes")])

@@ -1,5 +1,5 @@
 /* Post reload partially redundant load elimination
-   Copyright (C) 2004-2017 Free Software Foundation, Inc.
+   Copyright (C) 2004-2018 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -791,15 +791,18 @@ record_opr_changes (rtx_insn *insn)
 	record_last_reg_set_info_regno (insn, regno);
 
       for (link = CALL_INSN_FUNCTION_USAGE (insn); link; link = XEXP (link, 1))
-	if (GET_CODE (XEXP (link, 0)) == CLOBBER)
-	  {
-	    x = XEXP (XEXP (link, 0), 0);
-	    if (REG_P (x))
-	      {
-		gcc_assert (HARD_REGISTER_P (x));
-		record_last_reg_set_info (insn, x);
-	      }
-	  }
+	{
+	  gcc_assert (GET_CODE (XEXP (link, 0)) != CLOBBER_HIGH);
+	  if (GET_CODE (XEXP (link, 0)) == CLOBBER)
+	    {
+	      x = XEXP (XEXP (link, 0), 0);
+	      if (REG_P (x))
+		{
+		  gcc_assert (HARD_REGISTER_P (x));
+		  record_last_reg_set_info (insn, x);
+		}
+	    }
+	}
 
       if (! RTL_CONST_OR_PURE_CALL_P (insn))
 	record_last_mem_set_info (insn);
@@ -1108,14 +1111,14 @@ eliminate_partially_redundant_load (basic_block bb, rtx_insn *insn,
 	    avail_insn = NULL;
 	}
 
-      if (EDGE_CRITICAL_P (pred) && pred->count.initialized_p ())
-	critical_count += pred->count;
+      if (EDGE_CRITICAL_P (pred) && pred->count ().initialized_p ())
+	critical_count += pred->count ();
 
       if (avail_insn != NULL_RTX)
 	{
 	  npred_ok++;
-	  if (pred->count.initialized_p ())
-	    ok_count = ok_count + pred->count;
+	  if (pred->count ().initialized_p ())
+	    ok_count = ok_count + pred->count ();
 	  if (! set_noop_p (PATTERN (gen_move_insn (copy_rtx (dest),
 						    copy_rtx (avail_reg)))))
 	    {
@@ -1139,8 +1142,8 @@ eliminate_partially_redundant_load (basic_block bb, rtx_insn *insn,
 	  /* Adding a load on a critical edge will cause a split.  */
 	  if (EDGE_CRITICAL_P (pred))
 	    critical_edge_split = true;
-	  if (pred->count.initialized_p ())
-	    not_ok_count = not_ok_count + pred->count;
+	  if (pred->count ().initialized_p ())
+	    not_ok_count = not_ok_count + pred->count ();
 	  unoccr = (struct unoccr *) obstack_alloc (&unoccr_obstack,
 						    sizeof (struct unoccr));
 	  unoccr->insn = NULL;
@@ -1158,7 +1161,7 @@ eliminate_partially_redundant_load (basic_block bb, rtx_insn *insn,
       || (optimize_bb_for_size_p (bb) && npred_ok > 1)
       /* If we don't have profile information we cannot tell if splitting
          a critical edge is profitable or not so don't do it.  */
-      || ((! profile_info || profile_status_for_fn (cfun) != PROFILE_READ
+      || ((!profile_info || profile_status_for_fn (cfun) != PROFILE_READ
 	   || targetm.cannot_modify_jumps_p ())
 	  && critical_edge_split))
     goto cleanup;

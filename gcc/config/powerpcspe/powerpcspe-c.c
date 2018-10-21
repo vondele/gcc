@@ -1,5 +1,5 @@
 /* Subroutines for the C front end on the PowerPC architecture.
-   Copyright (C) 2002-2017 Free Software Foundation, Inc.
+   Copyright (C) 2002-2018 Free Software Foundation, Inc.
 
    Contributed by Zack Weinberg <zack@codesourcery.com>
    and Paolo Bonzini <bonzini@gnu.org>
@@ -19,6 +19,8 @@
    You should have received a copy of the GNU General Public License
    along with GCC; see the file COPYING3.  If not see
    <http://www.gnu.org/licenses/>.  */
+
+#define IN_TARGET_CODE 1
 
 #include "config.h"
 #include "system.h"
@@ -218,21 +220,22 @@ rs6000_macro_to_expand (cpp_reader *pfile, const cpp_token *tok)
       else if (ident && (ident != C_CPP_HASHNODE (__vector_keyword)))
 	{
 	  enum rid rid_code = (enum rid)(ident->rid_code);
-	  enum node_type itype = ident->type;
+	  bool is_macro = cpp_macro_p (ident);
+
 	  /* If there is a function-like macro, check if it is going to be
 	     invoked with or without arguments.  Without following ( treat
 	     it like non-macro, otherwise the following cpp_get_token eats
 	     what should be preserved.  */
-	  if (itype == NT_MACRO && cpp_fun_like_macro_p (ident))
+	  if (is_macro && cpp_fun_like_macro_p (ident))
 	    {
 	      int idx2 = idx;
 	      do
 		tok = cpp_peek_token (pfile, idx2++);
 	      while (tok->type == CPP_PADDING);
 	      if (tok->type != CPP_OPEN_PAREN)
-		itype = NT_VOID;
+		is_macro = false;
 	    }
-	  if (itype == NT_MACRO)
+	  if (is_macro)
 	    {
 	      do
 		(void) cpp_get_token (pfile);
@@ -6055,7 +6058,8 @@ altivec_resolve_overloaded_builtin (location_t loc, tree fndecl,
 	  /* If the second argument is an integer constant, if the value is in
 	     the expected range, generate the built-in code if we can.  We need
 	     64-bit and direct move to extract the small integer vectors.  */
-	  if (TREE_CODE (arg2) == INTEGER_CST && wi::ltu_p (arg2, nunits))
+	  if (TREE_CODE (arg2) == INTEGER_CST
+	      && wi::ltu_p (wi::to_wide (arg2), nunits))
 	    {
 	      switch (mode)
 		{
@@ -6217,7 +6221,7 @@ altivec_resolve_overloaded_builtin (location_t loc, tree fndecl,
       mode = TYPE_MODE (arg1_type);
       if ((mode == V2DFmode || mode == V2DImode) && VECTOR_UNIT_VSX_P (mode)
 	  && TREE_CODE (arg2) == INTEGER_CST
-	  && wi::ltu_p (arg2, 2))
+	  && wi::ltu_p (wi::to_wide (arg2), 2))
 	{
 	  tree call = NULL_TREE;
 
@@ -6233,7 +6237,7 @@ altivec_resolve_overloaded_builtin (location_t loc, tree fndecl,
 	}
       else if (mode == V1TImode && VECTOR_UNIT_VSX_P (mode)
 	       && TREE_CODE (arg2) == INTEGER_CST
-	       && wi::eq_p (arg2, 0))
+	       && wi::eq_p (wi::to_wide (arg2), 0))
 	{
 	  tree call = rs6000_builtin_decls[VSX_BUILTIN_VEC_SET_V1TI];
 

@@ -1,6 +1,6 @@
 /* More subroutines needed by GCC output code on some machines.  */
 /* Compile this one with gcc.  */
-/* Copyright (C) 1989-2017 Free Software Foundation, Inc.
+/* Copyright (C) 1989-2018 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -375,7 +375,8 @@ __mulvDI3 (DWtype u, DWtype v)
 		}
 	      else
 		{
-		  if (uu.s.high == (Wtype) -1 && vv.s.high == (Wtype) - 1)
+		  if ((uu.s.high & vv.s.high) == (Wtype) -1
+		      && (uu.s.low | vv.s.low) != 0)
 		    {
 		      DWunion ww = {.ll = (UDWtype) (UWtype) uu.s.low
 				    * (UDWtype) (UWtype) vv.s.low};
@@ -1938,15 +1939,9 @@ NAME (TYPE x, int m)
 #define CONCAT2(A,B)	_CONCAT2(A,B)
 #define _CONCAT2(A,B)	A##B
 
-/* All of these would be present in a full C99 implementation of <math.h>
-   and <complex.h>.  Our problem is that only a few systems have such full
-   implementations.  Further, libgcc_s.so isn't currently linked against
-   libm.so, and even for systems that do provide full C99, the extra overhead
-   of all programs using libgcc having to link against libm.  So avoid it.  */
-
-#define isnan(x)	__builtin_expect ((x) != (x), 0)
-#define isfinite(x)	__builtin_expect (!isnan((x) - (x)), 1)
-#define isinf(x)	__builtin_expect (!isnan(x) & !isfinite(x), 0)
+#define isnan(x)	__builtin_isnan (x)
+#define isfinite(x)	__builtin_isfinite (x)
+#define isinf(x)	__builtin_isinf (x)
 
 #define INFINITY	CONCAT2(__builtin_huge_val, CEXT) ()
 #define I		1i

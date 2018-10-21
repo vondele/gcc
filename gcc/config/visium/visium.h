@@ -1,5 +1,5 @@
 /* Definitions of target machine for Visium.
-   Copyright (C) 2002-2017 Free Software Foundation, Inc.
+   Copyright (C) 2002-2018 Free Software Foundation, Inc.
    Contributed by C.Nettleton, J.P.Parkes and P.Garbett.
 
    This file is part of GCC.
@@ -235,16 +235,6 @@
    the alignment that the object would ordinarily have.  The value of
    this macro is used instead of that alignment to align the object. */
 #define DATA_ALIGNMENT(TYPE,ALIGN) visium_data_alignment (TYPE, ALIGN)
-
-/* `CONSTANT_ALIGNMENT (CONSTANT, BASIC-ALIGN)`
-
-   If defined, a C expression to compute the alignment given to a
-   constant that is being placed in memory.  CONSTANT is the constant
-   and BASIC-ALIGN is the alignment that the object would ordinarily
-   have.  The value of this macro is used instead of that alignment to
-   align the object. */
-#define CONSTANT_ALIGNMENT(EXP,ALIGN) \
-  visium_data_alignment (TREE_TYPE (EXP), ALIGN)
 
 /* `LOCAL_ALIGNMENT (TYPE, BASIC-ALIGN)`
 
@@ -737,17 +727,6 @@ enum reg_class
    pointer to a smaller address.  */
 #define STACK_GROWS_DOWNWARD 1
 
-/* `STARTING_FRAME_OFFSET'
-
-   Offset from the frame pointer to the first local variable slot to
-   be allocated.
-
-   If `FRAME_GROWS_DOWNWARD', find the next slot's offset by
-   subtracting the first slot's length from `STARTING_FRAME_OFFSET'.
-   Otherwise, it is found by adding the length of the first slot to
-   the value `STARTING_FRAME_OFFSET'. */
-#define STARTING_FRAME_OFFSET 0
-
 /* `FIRST_PARM_OFFSET (FUNDECL)'
 
    Offset from the argument pointer register to the first argument's
@@ -1232,14 +1211,6 @@ do									\
    machines this should be `QImode'. */
 #define FUNCTION_MODE SImode
 
-/* `NO_IMPLICIT_EXTERN_C'
-
-   Define this macro if the system header files support C++ as well as
-   C.  This macro inhibits the usual method of using system header
-   files in C++, which is to pretend that the file's contents are
-   enclosed in `extern "C" {...}'. */
-#define NO_IMPLICIT_EXTERN_C
-
 /* Dividing the Output into Sections (Texts, Data, ...)
 
    An object file is divided into sections containing different types
@@ -1477,7 +1448,11 @@ do									\
    Here we output a word of zero so that jump-tables can be seperated
    in reverse assembly. */
 #define ASM_OUTPUT_CASE_END(STREAM, NUM, TABLE) \
-  asm_fprintf (STREAM, "\t.long   0\n");
+  asm_fprintf (STREAM, "\t.long   0\n")
+
+/* Support subalignment values.  */
+
+#define SUBALIGN_LOG 3
 
 /* Assembler Commands for Alignment
 
@@ -1511,7 +1486,7 @@ do									\
    POWER bytes.  POWER will be a C expression of type `int'. */
 #define ASM_OUTPUT_ALIGN(STREAM,LOG)      \
   if ((LOG) != 0)                       \
-    fprintf (STREAM, "\t.align  %d\n", (1<<(LOG)))
+    fprintf (STREAM, "\t.align  %d\n", (1 << (LOG)))
 
 /* `ASM_OUTPUT_MAX_SKIP_ALIGN (STREAM, POWER, MAX_SKIP)`
 
@@ -1522,16 +1497,10 @@ do									\
    expression of type `int'. */
 #define ASM_OUTPUT_MAX_SKIP_ALIGN(STREAM,LOG,MAX_SKIP)			\
   if ((LOG) != 0) {							\
-    if ((MAX_SKIP) == 0) fprintf ((STREAM), "\t.p2align %d\n", (LOG));	\
-    else {								\
+    if ((MAX_SKIP) == 0 || (MAX_SKIP) >= (1 << (LOG)) - 1)		\
+      fprintf ((STREAM), "\t.p2align %d\n", (LOG));			\
+    else								\
       fprintf ((STREAM), "\t.p2align %d,,%d\n", (LOG), (MAX_SKIP));	\
-      /* Make sure that we have at least 8-byte alignment if > 8-byte	\
-	 alignment is preferred.  */					\
-      if ((LOG) > 3							\
-	  && (1 << (LOG)) > ((MAX_SKIP) + 1)				\
-	  && (MAX_SKIP) >= 7)						\
-	fputs ("\t.p2align 3\n", (STREAM));				\
-    }									\
   }
 
 /* Controlling Debugging Information Format
@@ -1548,9 +1517,8 @@ do									\
    automatic variable having address X (an RTL expression).  The
    default computation assumes that X is based on the frame-pointer
    and gives the offset from the frame-pointer.  This is required for
-   targets that produce debugging output for DBX or COFF-style
-   debugging output for SDB and allow the frame-pointer to be
-   eliminated when the `-g' options is used. */
+   targets that produce debugging output for DBX and allow the frame-pointer
+   to be eliminated when the `-g' options is used. */
 #define DEBUGGER_AUTO_OFFSET(X) \
   (GET_CODE (X) == PLUS ? INTVAL (XEXP (X, 1)) : 0)
 

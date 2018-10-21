@@ -7,9 +7,9 @@
 package types
 
 import (
-	"bytes"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // A MethodSet is an ordered set of concrete or abstract (interface) methods;
@@ -24,7 +24,7 @@ func (s *MethodSet) String() string {
 		return "MethodSet {}"
 	}
 
-	var buf bytes.Buffer
+	var buf strings.Builder
 	fmt.Fprintln(&buf, "MethodSet {")
 	for _, f := range s.list {
 		fmt.Fprintf(&buf, "\t%s\n", f)
@@ -132,7 +132,7 @@ func NewMethodSet(T Type) *MethodSet {
 					// T is a type name. If typ appeared multiple times at
 					// this depth, f.Type appears multiple times at the next
 					// depth.
-					if f.anonymous {
+					if f.embedded {
 						typ, isPtr := deref(f.typ)
 						// TODO(gri) optimization: ignore types that can't
 						// have fields or methods (only Named, Struct, and
@@ -190,7 +190,10 @@ func NewMethodSet(T Type) *MethodSet {
 			list = append(list, m)
 		}
 	}
-	sort.Sort(byUniqueName(list))
+	// sort by unique name
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].obj.Id() < list[j].obj.Id()
+	})
 	return &MethodSet{list}
 }
 
@@ -257,10 +260,3 @@ func ptrRecv(f *Func) bool {
 	_, isPtr := deref(f.typ.(*Signature).recv.typ)
 	return isPtr
 }
-
-// byUniqueName function lists can be sorted by their unique names.
-type byUniqueName []*Selection
-
-func (a byUniqueName) Len() int           { return len(a) }
-func (a byUniqueName) Less(i, j int) bool { return a[i].obj.Id() < a[j].obj.Id() }
-func (a byUniqueName) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }

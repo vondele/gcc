@@ -24,7 +24,7 @@
 //
 // For a tutorial, see https://golang.org/s/types-tutorial.
 //
-package types // import "go/types"
+package types
 
 import (
 	"bytes"
@@ -161,14 +161,14 @@ type Info struct {
 	// in package clauses, or symbolic variables t in t := x.(type) of
 	// type switch headers), the corresponding objects are nil.
 	//
-	// For an anonymous field, Defs returns the field *Var it defines.
+	// For an embedded field, Defs returns the field *Var it defines.
 	//
 	// Invariant: Defs[id] == nil || Defs[id].Pos() == id.Pos()
 	Defs map[*ast.Ident]Object
 
 	// Uses maps identifiers to the objects they denote.
 	//
-	// For an anonymous field, Uses returns the *TypeName it denotes.
+	// For an embedded field, Uses returns the *TypeName it denotes.
 	//
 	// Invariant: Uses[id].Pos() != id.Pos()
 	Uses map[*ast.Ident]Object
@@ -176,11 +176,11 @@ type Info struct {
 	// Implicits maps nodes to their implicitly declared objects, if any.
 	// The following node and object types may appear:
 	//
-	//	node               declared object
+	//     node               declared object
 	//
-	//	*ast.ImportSpec    *PkgName for dot-imports and imports without renames
-	//	*ast.CaseClause    type-specific *Var for each type switch case clause (incl. default)
-	//      *ast.Field         anonymous parameter *Var
+	//     *ast.ImportSpec    *PkgName for imports without renames
+	//     *ast.CaseClause    type-specific *Var for each type switch case clause (incl. default)
+	//     *ast.Field         anonymous parameter *Var
 	//
 	Implicits map[ast.Node]Object
 
@@ -200,16 +200,16 @@ type Info struct {
 	//
 	// The following node types may appear in Scopes:
 	//
-	//	*ast.File
-	//	*ast.FuncType
-	//	*ast.BlockStmt
-	//	*ast.IfStmt
-	//	*ast.SwitchStmt
-	//	*ast.TypeSwitchStmt
-	//	*ast.CaseClause
-	//	*ast.CommClause
-	//	*ast.ForStmt
-	//	*ast.RangeStmt
+	//     *ast.File
+	//     *ast.FuncType
+	//     *ast.BlockStmt
+	//     *ast.IfStmt
+	//     *ast.SwitchStmt
+	//     *ast.TypeSwitchStmt
+	//     *ast.CaseClause
+	//     *ast.CommClause
+	//     *ast.ForStmt
+	//     *ast.RangeStmt
 	//
 	Scopes map[ast.Node]*Scope
 
@@ -239,7 +239,7 @@ func (info *Info) TypeOf(e ast.Expr) Type {
 // ObjectOf returns the object denoted by the specified id,
 // or nil if not found.
 //
-// If id is an anonymous struct field, ObjectOf returns the field (*Var)
+// If id is an embedded struct field, ObjectOf returns the field (*Var)
 // it uses, not the type (*TypeName) it defines.
 //
 // Precondition: the Uses and Defs maps are populated.
@@ -309,7 +309,7 @@ func (tv TypeAndValue) Assignable() bool {
 }
 
 // HasOk reports whether the corresponding expression may be
-// used on the lhs of a comma-ok assignment.
+// used on the rhs of a comma-ok assignment.
 func (tv TypeAndValue) HasOk() bool {
 	return tv.mode == commaok || tv.mode == mapindex
 }

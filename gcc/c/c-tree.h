@@ -1,5 +1,5 @@
 /* Definitions for C parsing and type checking.
-   Copyright (C) 1987-2017 Free Software Foundation, Inc.
+   Copyright (C) 1987-2018 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -102,7 +102,7 @@ along with GCC; see the file COPYING3.  If not see
 #define C_DECL_ISNT_PROTOTYPE(EXP)			\
        (EXP == 0					\
 	|| (!prototype_p (TREE_TYPE (EXP))	\
-	    && !DECL_BUILT_IN (EXP)))
+	    && !fndecl_built_in_p (EXP)))
 
 /* For FUNCTION_TYPE, a hidden list of types of arguments.  The same as
    TYPE_ARG_TYPES for functions with prototypes, but created for functions
@@ -477,6 +477,8 @@ struct c_parm {
   tree attrs;
   /* The declarator.  */
   struct c_declarator *declarator;
+  /* The location of the parameter.  */
+  location_t loc;
 };
 
 /* Used when parsing an enum.  Initialized by start_enum.  */
@@ -581,7 +583,7 @@ extern void temp_pop_parm_decls (void);
 extern tree xref_tag (enum tree_code, tree);
 extern struct c_typespec parser_xref_tag (location_t, enum tree_code, tree);
 extern struct c_parm *build_c_parm (struct c_declspecs *, tree,
-				    struct c_declarator *);
+				    struct c_declarator *, location_t);
 extern struct c_declarator *build_attrs_declarator (tree,
 						    struct c_declarator *);
 extern struct c_declarator *build_function_declarator (struct c_arg_info *,
@@ -638,6 +640,7 @@ extern struct c_expr default_function_array_read_conversion (location_t,
 							     struct c_expr);
 extern struct c_expr convert_lvalue_to_rvalue (location_t, struct c_expr,
 					       bool, bool);
+extern tree decl_constant_value_1 (tree, bool);
 extern void mark_exp_read (tree);
 extern tree composite_type (tree, tree);
 extern tree build_component_ref (location_t, tree, tree, location_t);
@@ -669,7 +672,8 @@ extern void set_init_index (location_t, tree, tree, struct obstack *);
 extern void set_init_label (location_t, tree, location_t, struct obstack *);
 extern void process_init_element (location_t, struct c_expr, bool,
 				  struct obstack *);
-extern tree build_compound_literal (location_t, tree, tree, bool);
+extern tree build_compound_literal (location_t, tree, tree, bool,
+				    unsigned int);
 extern void check_compound_literal_type (location_t, struct c_type_name *);
 extern tree c_start_case (location_t, location_t, tree, bool);
 extern void c_finish_case (tree, tree);
@@ -758,6 +762,8 @@ extern bool pedwarn_c90 (location_t, int opt, const char *, ...)
     ATTRIBUTE_GCC_DIAG(3,4);
 extern bool pedwarn_c99 (location_t, int opt, const char *, ...)
     ATTRIBUTE_GCC_DIAG(3,4);
+extern bool pedwarn_c11 (location_t, int opt, const char *, ...)
+    ATTRIBUTE_GCC_DIAG(3,4);
 
 extern void
 set_c_expr_source_range (c_expr *expr,
@@ -768,8 +774,6 @@ set_c_expr_source_range (c_expr *expr,
 			 source_range src_range);
 
 /* In c-fold.c */
-extern tree decl_constant_value_for_optimization (tree);
-
 extern vec<tree> incomplete_record_decls;
 
 #if CHECKING_P

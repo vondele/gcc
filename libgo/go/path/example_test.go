@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package path
+// +build gccgo_examples
 
-/* Commented out until gccgo has example support.
+package path
 
 import (
 	"fmt"
@@ -49,11 +49,15 @@ func ExampleClean() {
 func ExampleDir() {
 	fmt.Println(path.Dir("/a/b/c"))
 	fmt.Println(path.Dir("a/b/c"))
+	fmt.Println(path.Dir("/a/"))
+	fmt.Println(path.Dir("a/"))
 	fmt.Println(path.Dir("/"))
 	fmt.Println(path.Dir(""))
 	// Output:
 	// /a/b
 	// a/b
+	// /a
+	// a
 	// /
 	// .
 }
@@ -89,6 +93,16 @@ func ExampleJoin() {
 	// a
 }
 
+func ExampleMatch() {
+	fmt.Println(path.Match("abc", "abc"))
+	fmt.Println(path.Match("a*", "abc"))
+	fmt.Println(path.Match("a*/b", "a/c/b"))
+	// Output:
+	// true <nil>
+	// true <nil>
+	// false <nil>
+}
+
 func ExampleSplit() {
 	fmt.Println(path.Split("static/myfile.css"))
 	fmt.Println(path.Split("myfile.css"))
@@ -98,5 +112,3 @@ func ExampleSplit() {
 	//  myfile.css
 	//
 }
-
-*/

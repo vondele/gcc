@@ -719,6 +719,27 @@ func TestHardLink(t *testing.T) {
 	if !SameFile(tostat, fromstat) {
 		t.Errorf("link %q, %q did not create hard link", to, from)
 	}
+	// We should not be able to perform the same Link() a second time
+	err = Link(to, from)
+	switch err := err.(type) {
+	case *LinkError:
+		if err.Op != "link" {
+			t.Errorf("Link(%q, %q) err.Op = %q; want %q", to, from, err.Op, "link")
+		}
+		if err.Old != to {
+			t.Errorf("Link(%q, %q) err.Old = %q; want %q", to, from, err.Old, to)
+		}
+		if err.New != from {
+			t.Errorf("Link(%q, %q) err.New = %q; want %q", to, from, err.New, from)
+		}
+		if !IsExist(err.Err) {
+			t.Errorf("Link(%q, %q) err.Err = %q; want %q", to, from, err.Err, "file exists error")
+		}
+	case nil:
+		t.Errorf("link %q, %q: expected error, got nil", from, to)
+	default:
+		t.Errorf("link %q, %q: expected %T, got %T %v", from, to, new(LinkError), err, err)
+	}
 }
 
 // chtmpdir changes the working directory to a new temporary directory and
@@ -1012,9 +1033,14 @@ func TestStartProcess(t *testing.T) {
 		dir = Getenv("SystemRoot")
 		args = []string{"/c", "cd"}
 	default:
-		cmd = "/bin/pwd"
+		var err error
+		cmd, err = osexec.LookPath("pwd")
+		if err != nil {
+			t.Fatalf("Can't find pwd: %v", err)
+		}
 		dir = "/"
 		args = []string{}
+		t.Logf("Testing with %v", cmd)
 	}
 	cmddir, cmdbase := filepath.Split(cmd)
 	args = append([]string{cmdbase}, args...)
@@ -1162,9 +1188,14 @@ func testChtimes(t *testing.T, name string) {
 			// the contents are accessed; also, it is set
 			// whenever mtime is set.
 		case "netbsd":
-			t.Logf("AccessTime didn't go backwards; was=%d, after=%d (Ignoring. See NetBSD issue golang.org/issue/19293)", at, pat)
+			mounts, _ := ioutil.ReadFile("/proc/mounts")
+			if strings.Contains(string(mounts), "noatime") {
+				t.Logf("AccessTime didn't go backwards, but see a filesystem mounted noatime; ignoring. Issue 19293.")
+			} else {
+				t.Logf("AccessTime didn't go backwards; was=%v, after=%v (Ignoring on NetBSD, assuming noatime, Issue 19293)", at, pat)
+			}
 		default:
-			t.Errorf("AccessTime didn't go backwards; was=%d, after=%d", at, pat)
+			t.Errorf("AccessTime didn't go backwards; was=%v, after=%v", at, pat)
 		}
 	}
 
@@ -1211,9 +1242,9 @@ func TestChdirAndGetwd(t *testing.T) {
 			if mode == 0 {
 				err = Chdir(d)
 			} else {
-				fd1, err := Open(d)
-				if err != nil {
-					t.Errorf("Open %s: %s", d, err)
+				fd1, err1 := Open(d)
+				if err1 != nil {
+					t.Errorf("Open %s: %s", d, err1)
 					continue
 				}
 				err = fd1.Chdir()
@@ -1329,14 +1360,26 @@ func TestSeek(t *testing.T) {
 		{-1, io.SeekEnd, int64(len(data)) - 1},
 		{1 << 33, io.SeekStart, 1 << 33},
 		{1 << 33, io.SeekEnd, 1<<33 + int64(len(data))},
+
+		// Issue 21681, Windows 4G-1, etc:
+		{1<<32 - 1, io.SeekStart, 1<<32 - 1},
+		{0, io.SeekCurrent, 1<<32 - 1},
+		{2<<32 - 1, io.SeekStart, 2<<32 - 1},
+		{0, io.SeekCurrent, 2<<32 - 1},
 	}
 	for i, tt := range tests {
+		if runtime.GOOS == "nacl" && tt.out > 1<<30 {
+			t.Logf("skipping test case #%d on nacl; https://golang.org/issue/21728", i)
+			continue
+		}
 		off, err := f.Seek(tt.in, tt.whence)
 		if off != tt.out || err != nil {
-			if e, ok := err.(*PathError); ok && e.Err == syscall.EINVAL && tt.out > 1<<32 {
-				// Reiserfs rejects the big seeks.
-				// https://golang.org/issue/91
-				break
+			if e, ok := err.(*PathError); ok && e.Err == syscall.EINVAL && tt.out > 1<<32 && runtime.GOOS == "linux" {
+				mounts, _ := ioutil.ReadFile("/proc/mounts")
+				if strings.Contains(string(mounts), "reiserfs") {
+					// Reiserfs rejects the big seeks.
+					t.Skipf("skipping test known to fail on reiserfs; https://golang.org/issue/91")
+				}
 			}
 			t.Errorf("#%d: Seek(%v, %v) = %v, %v want %v, nil", i, tt.in, tt.whence, off, err, tt.out)
 		}
@@ -1345,7 +1388,7 @@ func TestSeek(t *testing.T) {
 
 func TestSeekError(t *testing.T) {
 	switch runtime.GOOS {
-	case "plan9", "nacl":
+	case "js", "nacl", "plan9":
 		t.Skipf("skipping test on %v", runtime.GOOS)
 	}
 
@@ -1440,7 +1483,7 @@ func TestOpenNoName(t *testing.T) {
 	}
 }
 
-func runBinHostname(t *testing.T) string {
+func runBinHostname(t *testing.T, argv []string) string {
 	// Run /bin/hostname and collect output.
 	r, w, err := Pipe()
 	if err != nil {
@@ -1448,7 +1491,7 @@ func runBinHostname(t *testing.T) string {
 	}
 	defer r.Close()
 	const path = "/bin/hostname"
-	p, err := StartProcess(path, []string{"hostname"}, &ProcAttr{Files: []*File{nil, w, Stderr}})
+	p, err := StartProcess(path, argv, &ProcAttr{Files: []*File{nil, w, Stderr}})
 	if err != nil {
 		if _, err := Stat(path); IsNotExist(err) {
 			t.Skipf("skipping test; test requires %s but it does not exist", path)
@@ -1478,11 +1521,7 @@ func runBinHostname(t *testing.T) string {
 	return output
 }
 
-func testWindowsHostname(t *testing.T) {
-	hostname, err := Hostname()
-	if err != nil {
-		t.Fatal(err)
-	}
+func testWindowsHostname(t *testing.T, hostname string) {
 	cmd := osexec.Command("hostname")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1490,18 +1529,30 @@ func testWindowsHostname(t *testing.T) {
 	}
 	want := strings.Trim(string(out), "\r\n")
 	if hostname != want {
-		t.Fatalf("Hostname() = %q, want %q", hostname, want)
+		t.Fatalf("Hostname() = %q != system hostname of %q", hostname, want)
 	}
 }
 
 func TestHostname(t *testing.T) {
+	hostname, err := Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hostname == "" {
+		t.Fatal("Hostname returned empty string and no error")
+	}
+	if strings.Contains(hostname, "\x00") {
+		t.Fatalf("unexpected zero byte in hostname: %q", hostname)
+	}
+
 	// There is no other way to fetch hostname on windows, but via winapi.
 	// On Plan 9 it can be taken from #c/sysname as Hostname() does.
 	switch runtime.GOOS {
 	case "android", "plan9":
-		t.Skipf("%s doesn't have /bin/hostname", runtime.GOOS)
+		// No /bin/hostname to verify against.
+		return
 	case "windows":
-		testWindowsHostname(t)
+		testWindowsHostname(t, hostname)
 		return
 	}
 
@@ -1510,11 +1561,12 @@ func TestHostname(t *testing.T) {
 	// Check internal Hostname() against the output of /bin/hostname.
 	// Allow that the internal Hostname returns a Fully Qualified Domain Name
 	// and the /bin/hostname only returns the first component
-	hostname, err := Hostname()
-	if err != nil {
-		t.Fatalf("%v", err)
+	var want string
+	if runtime.GOOS == "aix" {
+		want = runBinHostname(t, []string{"hostname", "-s"})
+	} else {
+		want = runBinHostname(t, []string{"hostname"})
 	}
-	want := runBinHostname(t)
 	if hostname != want {
 		i := strings.Index(hostname, ".")
 		if i < 0 || hostname[0:i] != want {
@@ -1746,23 +1798,54 @@ func TestSameFile(t *testing.T) {
 	}
 }
 
-func TestDevNullFile(t *testing.T) {
-	f, err := Open(DevNull)
-	if err != nil {
-		t.Fatalf("Open(%s): %v", DevNull, err)
-	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		t.Fatalf("Stat(%s): %v", DevNull, err)
-	}
-	name := filepath.Base(DevNull)
-	if fi.Name() != name {
-		t.Fatalf("wrong file name have %v want %v", fi.Name(), name)
+func testDevNullFileInfo(t *testing.T, statname, devNullName string, fi FileInfo, ignoreCase bool) {
+	pre := fmt.Sprintf("%s(%q): ", statname, devNullName)
+	name := filepath.Base(devNullName)
+	if ignoreCase {
+		if strings.ToUpper(fi.Name()) != strings.ToUpper(name) {
+			t.Errorf(pre+"wrong file name have %v want %v", fi.Name(), name)
+		}
+	} else {
+		if fi.Name() != name {
+			t.Errorf(pre+"wrong file name have %v want %v", fi.Name(), name)
+		}
 	}
 	if fi.Size() != 0 {
-		t.Fatalf("wrong file size have %d want 0", fi.Size())
+		t.Errorf(pre+"wrong file size have %d want 0", fi.Size())
 	}
+	if fi.Mode()&ModeDevice == 0 {
+		t.Errorf(pre+"wrong file mode %q: ModeDevice is not set", fi.Mode())
+	}
+	if fi.Mode()&ModeCharDevice == 0 {
+		t.Errorf(pre+"wrong file mode %q: ModeCharDevice is not set", fi.Mode())
+	}
+	if fi.Mode().IsRegular() {
+		t.Errorf(pre+"wrong file mode %q: IsRegular returns true", fi.Mode())
+	}
+}
+
+func testDevNullFile(t *testing.T, devNullName string, ignoreCase bool) {
+	f, err := Open(devNullName)
+	if err != nil {
+		t.Fatalf("Open(%s): %v", devNullName, err)
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		t.Fatalf("Stat(%s): %v", devNullName, err)
+	}
+	testDevNullFileInfo(t, "f.Stat", devNullName, fi, ignoreCase)
+
+	fi, err = Stat(devNullName)
+	if err != nil {
+		t.Fatalf("Stat(%s): %v", devNullName, err)
+	}
+	testDevNullFileInfo(t, "Stat", devNullName, fi, ignoreCase)
+}
+
+func TestDevNullFile(t *testing.T) {
+	testDevNullFile(t, DevNull, false)
 }
 
 var testLargeWrite = flag.Bool("large_write", false, "run TestLargeWriteToConsole test that floods console with output")
@@ -1836,7 +1919,7 @@ func TestStatStdin(t *testing.T) {
 		t.Fatal(err)
 	}
 	switch mode := fi.Mode(); {
-	case mode&ModeCharDevice != 0:
+	case mode&ModeCharDevice != 0 && mode&ModeDevice != 0:
 	case mode&ModeNamedPipe != 0:
 	default:
 		t.Fatalf("unexpected Stdin mode (%v), want ModeCharDevice or ModeNamedPipe", mode)
@@ -2172,6 +2255,8 @@ func TestPipeThreads(t *testing.T) {
 		t.Skip("skipping on Windows; issue 19098")
 	case "plan9":
 		t.Skip("skipping on Plan 9; does not support runtime poller")
+	case "js":
+		t.Skip("skipping on js; no support for os.Pipe")
 	}
 
 	threads := 100
@@ -2198,22 +2283,24 @@ func TestPipeThreads(t *testing.T) {
 
 	defer debug.SetMaxThreads(debug.SetMaxThreads(threads / 2))
 
-	var wg sync.WaitGroup
-	wg.Add(threads)
-	c := make(chan bool, threads)
+	creading := make(chan bool, threads)
+	cdone := make(chan bool, threads)
 	for i := 0; i < threads; i++ {
 		go func(i int) {
-			defer wg.Done()
 			var b [1]byte
-			c <- true
+			creading <- true
 			if _, err := r[i].Read(b[:]); err != nil {
 				t.Error(err)
 			}
+			if err := r[i].Close(); err != nil {
+				t.Error(err)
+			}
+			cdone <- true
 		}(i)
 	}
 
 	for i := 0; i < threads; i++ {
-		<-c
+		<-creading
 	}
 
 	// If we are still alive, it means that the 100 goroutines did
@@ -2226,14 +2313,7 @@ func TestPipeThreads(t *testing.T) {
 		if err := w[i].Close(); err != nil {
 			t.Error(err)
 		}
-	}
-
-	wg.Wait()
-
-	for i := 0; i < threads; i++ {
-		if err := r[i].Close(); err != nil {
-			t.Error(err)
-		}
+		<-cdone
 	}
 }
 

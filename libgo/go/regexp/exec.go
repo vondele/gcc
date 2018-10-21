@@ -10,13 +10,13 @@ import (
 )
 
 // A queue is a 'sparse array' holding pending threads of execution.
-// See http://research.swtch.com/2008/03/using-uninitialized-memory-for-fun-and.html
+// See https://research.swtch.com/2008/03/using-uninitialized-memory-for-fun-and.html
 type queue struct {
 	sparse []uint32
 	dense  []entry
 }
 
-// A entry is an entry on a queue.
+// An entry is an entry on a queue.
 // It holds both the instruction pc and the actual thread.
 // Some queue entries are just place holders so that the machine
 // knows it has considered that pc. Such entries have t == nil.
@@ -27,7 +27,7 @@ type entry struct {
 
 // A thread is the state of a single path through the machine:
 // an instruction and a corresponding capture array.
-// See http://swtch.com/~rsc/regexp/regexp2.html
+// See https://swtch.com/~rsc/regexp/regexp2.html
 type thread struct {
 	inst *syntax.Inst
 	cap  []int
@@ -338,15 +338,14 @@ func (m *machine) onepass(i input, pos, ncap int) bool {
 	if pos == 0 && syntax.EmptyOp(inst.Arg)&^flag == 0 &&
 		len(m.re.prefix) > 0 && i.canCheckPrefix() {
 		// Match requires literal prefix; fast search for it.
-		if i.hasPrefix(m.re) {
-			pos += len(m.re.prefix)
-			r, width = i.step(pos)
-			r1, width1 = i.step(pos + width)
-			flag = i.context(pos)
-			pc = int(m.re.prefixEnd)
-		} else {
+		if !i.hasPrefix(m.re) {
 			return m.matched
 		}
+		pos += len(m.re.prefix)
+		r, width = i.step(pos)
+		r1, width1 = i.step(pos + width)
+		flag = i.context(pos)
+		pc = int(m.re.prefixEnd)
 	}
 	for {
 		inst = m.op.Inst[pc]

@@ -1,5 +1,5 @@
 /* Definitions of target machine for GCC, for SPARC running Solaris 2
-   Copyright (C) 1992-2017 Free Software Foundation, Inc.
+   Copyright (C) 1992-2018 Free Software Foundation, Inc.
    Contributed by Ron Guilmette (rfg@netcom.com).
    Additional changes by David V. Henkel-Wallace (gumby@cygnus.com).
 
@@ -413,7 +413,7 @@ extern const char *host_detect_local_cpu (int argc, const char **argv);
    with GNU as. */
 #define ASM_OUTPUT_ALIGN_WITH_NOP(FILE,LOG)   \
   if ((LOG) != 0)                             \
-    fprintf (FILE, "\t.align %d,0x1000000\n", (1<<(LOG)))
+    fprintf (FILE, "\t.align %d,0x1000000\n", (1 << (LOG)))
 
 /* Use Solaris ELF section syntax with Sun as.  */
 #undef TARGET_ASM_NAMED_SECTION

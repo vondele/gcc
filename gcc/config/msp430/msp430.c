@@ -1,5 +1,5 @@
 /* Subroutines used for code generation on TI MSP430 processors.
-   Copyright (C) 2012-2017 Free Software Foundation, Inc.
+   Copyright (C) 2012-2018 Free Software Foundation, Inc.
    Contributed by Red Hat.
 
    This file is part of GCC.
@@ -17,6 +17,8 @@
    You should have received a copy of the GNU General Public License
    along with GCC; see the file COPYING3.  If not see
    <http://www.gnu.org/licenses/>.  */
+
+#define IN_TARGET_CODE 1
 
 #include "config.h"
 #include "system.h"
@@ -723,10 +725,25 @@ msp430_mcu_name (void)
   if (target_mcu)
     {
       unsigned int i;
-      static char mcu_name [64];
+      unsigned int start_upper;
+      unsigned int end_upper;
+      static char mcu_name[64];
 
-      snprintf (mcu_name, sizeof (mcu_name) - 1, "__%s__", target_mcu);
-      for (i = strlen (mcu_name); i--;)
+      /* The 'i' in the device name symbol for msp430i* devices must be lower
+	 case, to match the expected symbol in msp430.h.  */
+      if (strncmp (target_mcu, "msp430i", 7) == 0)
+	{
+	  snprintf (mcu_name, sizeof (mcu_name) - 1, "__MSP430i%s__",
+		    target_mcu + 7);
+	  start_upper = 9;
+	}
+      else
+	{
+	  snprintf (mcu_name, sizeof (mcu_name) - 1, "__%s__", target_mcu);
+	  start_upper = 2;
+	}
+      end_upper = strlen (mcu_name) - 2;
+      for (i = start_upper; i < end_upper; i++)
 	mcu_name[i] = TOUPPER (mcu_name[i]);
       return mcu_name;
     }
@@ -751,6 +768,10 @@ hwmult_name (unsigned int val)
 static void
 msp430_option_override (void)
 {
+  /* The MSP430 architecture can safely dereference a NULL pointer. In fact,
+  there are memory mapped registers there.  */
+  flag_delete_null_pointer_checks = 0;
+
   init_machine_status = msp430_init_machine_status;
 
   if (target_cpu)
@@ -908,6 +929,8 @@ msp430_hard_regno_nregs (unsigned int, machine_mode mode)
 {
   if (mode == PSImode && msp430x)
     return 1;
+  if (mode == CPSImode && msp430x)
+    return 2;
   return ((GET_MODE_SIZE (mode) + UNITS_PER_WORD - 1)
 	  / UNITS_PER_WORD);
 }
@@ -930,6 +953,8 @@ msp430_hard_regno_nregs_with_padding (int regno ATTRIBUTE_UNUSED,
 {
   if (mode == PSImode)
     return 2;
+  if (mode == CPSImode)
+    return 4;
   return msp430_hard_regno_nregs (regno, mode);
 }
 
@@ -1398,16 +1423,17 @@ msp430_return_in_memory (const_tree ret_type, const_tree fntype ATTRIBUTE_UNUSED
 #undef  TARGET_GET_RAW_ARG_MODE
 #define TARGET_GET_RAW_ARG_MODE msp430_get_raw_arg_mode
 
-static machine_mode
+static fixed_size_mode
 msp430_get_raw_arg_mode (int regno)
 {
-  return (regno == ARG_POINTER_REGNUM) ? VOIDmode : Pmode;
+  return as_a <fixed_size_mode> (regno == ARG_POINTER_REGNUM
+				 ? VOIDmode : Pmode);
 }
 
 #undef  TARGET_GET_RAW_RESULT_MODE
 #define TARGET_GET_RAW_RESULT_MODE msp430_get_raw_result_mode
 
-static machine_mode
+static fixed_size_mode
 msp430_get_raw_result_mode (int regno ATTRIBUTE_UNUSED)
 {
   return Pmode;
@@ -1844,6 +1870,17 @@ msp430_allocate_stack_slots_for_args (void)
   return ! is_naked_func ();
 }
 
+#undef TARGET_WARN_FUNC_RETURN
+#define TARGET_WARN_FUNC_RETURN msp430_warn_func_return
+
+static bool
+msp430_warn_func_return (tree decl)
+{
+  /* Naked functions are implemented entirely in assembly, including the
+     return sequence, so suppress warnings about this.  */
+  return !is_naked_func (decl);
+}
+
 /* Verify MSP430 specific attributes.  */
 #define TREE_NAME_EQ(NAME, STR) (strcmp (IDENTIFIER_POINTER (NAME), (STR)) == 0)
 
@@ -1856,11 +1893,9 @@ msp430_attr (tree * node,
 {
   gcc_assert (DECL_P (* node));
 
+  /* Only the interrupt attribute takes an argument.  */
   if (args != NULL)
     {
-      /* Only the interrupt attribute takes an argument.  */
-      gcc_assert (TREE_NAME_EQ (name, ATTR_INTR));
-
       tree value = TREE_VALUE (args);
 
       switch (TREE_CODE (value))
@@ -1877,7 +1912,7 @@ msp430_attr (tree * node,
 	  break;
 
 	case INTEGER_CST:
-	  if (wi::gtu_p (value, 63))
+	  if (wi::gtu_p (wi::to_wide (value), 63))
 	    /* Allow the attribute to be added - the linker script
 	       being used may still recognise this value.  */
 	    warning (OPT_Wattributes,
@@ -1905,13 +1940,12 @@ msp430_attr (tree * node,
       if (TREE_CODE (TREE_TYPE (* node)) == FUNCTION_TYPE
 	  && ! VOID_TYPE_P (TREE_TYPE (TREE_TYPE (* node))))
 	message = "interrupt handlers must be void";
-
-      if (! TREE_PUBLIC (* node))
-	message = "interrupt handlers cannot be static";
-
-      /* Ensure interrupt handlers never get optimised out.  */
-      TREE_USED (* node) = 1;
-      DECL_PRESERVE_P (* node) = 1;
+      else
+	{
+	  /* Ensure interrupt handlers never get optimised out.  */
+	  TREE_USED (* node) = 1;
+	  DECL_PRESERVE_P (* node) = 1;
+	}
     }
   else if (TREE_NAME_EQ (name, ATTR_REENT))
     {
@@ -2044,23 +2078,28 @@ msp430_data_attr (tree * node,
 /* Table of MSP430-specific attributes.  */
 const struct attribute_spec msp430_attribute_table[] =
 {
-  /* Name        min_num_args     type_req,             affects_type_identity
-                      max_num_args,     fn_type_req
-                          decl_req               handler.  */
-  { ATTR_INTR,        0, 1, true,  false, false, msp430_attr, false },
-  { ATTR_NAKED,       0, 0, true,  false, false, msp430_attr, false },
-  { ATTR_REENT,       0, 0, true,  false, false, msp430_attr, false },
-  { ATTR_CRIT,        0, 0, true,  false, false, msp430_attr, false },
-  { ATTR_WAKEUP,      0, 0, true,  false, false, msp430_attr, false },
+  /* Name        min_num_args     type_req,             handler
+		      max_num_args,     fn_type_req		exclude
+                          decl_req               affects_type_identity.  */
+  { ATTR_INTR,        0, 1, true,  false, false, false, msp430_attr, NULL },
+  { ATTR_NAKED,       0, 0, true,  false, false, false, msp430_attr, NULL },
+  { ATTR_REENT,       0, 0, true,  false, false, false, msp430_attr, NULL },
+  { ATTR_CRIT,        0, 0, true,  false, false, false, msp430_attr, NULL },
+  { ATTR_WAKEUP,      0, 0, true,  false, false, false, msp430_attr, NULL },
 
-  { ATTR_LOWER,       0, 0, true,  false, false, msp430_section_attr, false },
-  { ATTR_UPPER,       0, 0, true,  false, false, msp430_section_attr, false },
-  { ATTR_EITHER,      0, 0, true,  false, false, msp430_section_attr, false },
+  { ATTR_LOWER,       0, 0, true,  false, false, false, msp430_section_attr,
+    NULL },
+  { ATTR_UPPER,       0, 0, true,  false, false, false, msp430_section_attr,
+    NULL },
+  { ATTR_EITHER,      0, 0, true,  false, false, false, msp430_section_attr,
+    NULL },
 
-  { ATTR_NOINIT,      0, 0, true,  false, false, msp430_data_attr, false },
-  { ATTR_PERSIST,     0, 0, true,  false, false, msp430_data_attr, false },
+  { ATTR_NOINIT,      0, 0, true,  false, false, false, msp430_data_attr,
+    NULL },
+  { ATTR_PERSIST,     0, 0, true,  false, false, false, msp430_data_attr,
+    NULL },
 
-  { NULL,             0, 0, false, false, false, NULL, false }
+  { NULL,             0, 0, false, false, false, false, NULL,  NULL }
 };
 
 #undef  TARGET_ASM_FUNCTION_PROLOGUE
@@ -3389,6 +3428,9 @@ msp430_output_labelref (FILE *file, const char *name)
 	}
     }
 
+  if (user_label_prefix[0] != 0)
+    fputs (user_label_prefix, file);
+
   fputs (name, file);
 }
 
@@ -3829,6 +3871,9 @@ msp430_can_change_mode_class (machine_mode from, machine_mode to, reg_class_t)
   return true;
 }
 
+#undef  TARGET_HAVE_SPECULATION_SAFE_VALUE
+#define TARGET_HAVE_SPECULATION_SAFE_VALUE speculation_safe_value_not_needed
+
 struct gcc_target targetm = TARGET_INITIALIZER;
 
 #include "gt-msp430.h"

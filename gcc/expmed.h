@@ -1,5 +1,5 @@
 /* Target-dependent costs for expmed.c.
-   Copyright (C) 1987-2017 Free Software Foundation, Inc.
+   Copyright (C) 1987-2018 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -702,6 +702,8 @@ extern rtx emit_store_flag (rtx, enum rtx_code, rtx, rtx, machine_mode,
 extern rtx emit_store_flag_force (rtx, enum rtx_code, rtx, rtx,
 				  machine_mode, int, int);
 
+extern void canonicalize_comparison (machine_mode, enum rtx_code *, rtx *);
+
 /* Choose a minimal N + 1 bit approximation to 1/D that can be used to
    replace division by D, and put the least significant N bits of the result
    in *MULTIPLIER_PTR and return the most significant bit.  */
@@ -712,22 +714,19 @@ extern unsigned HOST_WIDE_INT choose_multiplier (unsigned HOST_WIDE_INT, int,
 #ifdef TREE_CODE
 extern rtx expand_variable_shift (enum tree_code, machine_mode,
 				  rtx, tree, rtx, int);
-extern rtx expand_shift (enum tree_code, machine_mode, rtx, int, rtx,
-			     int);
+extern rtx expand_shift (enum tree_code, machine_mode, rtx, poly_int64, rtx,
+			 int);
 extern rtx expand_divmod (int, enum tree_code, machine_mode, rtx, rtx,
 			  rtx, int);
 #endif
 
-extern void store_bit_field (rtx, unsigned HOST_WIDE_INT,
-			     unsigned HOST_WIDE_INT,
-			     unsigned HOST_WIDE_INT,
-			     unsigned HOST_WIDE_INT,
+extern void store_bit_field (rtx, poly_uint64, poly_uint64,
+			     poly_uint64, poly_uint64,
 			     machine_mode, rtx, bool);
-extern rtx extract_bit_field (rtx, unsigned HOST_WIDE_INT,
-			      unsigned HOST_WIDE_INT, int, rtx,
+extern rtx extract_bit_field (rtx, poly_uint64, poly_uint64, int, rtx,
 			      machine_mode, machine_mode, bool, rtx *);
 extern rtx extract_low_bits (machine_mode, machine_mode, rtx);
-extern rtx expand_mult (machine_mode, rtx, rtx, rtx, int);
+extern rtx expand_mult (machine_mode, rtx, rtx, rtx, int, bool = false);
 extern rtx expand_mult_highpart_adjust (scalar_int_mode, rtx, rtx, rtx,
 					rtx, int);
 

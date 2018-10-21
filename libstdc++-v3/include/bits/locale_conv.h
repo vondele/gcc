@@ -1,6 +1,6 @@
 // wstring_convert implementation -*- C++ -*-
 
-// Copyright (C) 2015-2017 Free Software Foundation, Inc.
+// Copyright (C) 2015-2018 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -174,14 +174,17 @@ _GLIBCXX_BEGIN_NAMESPACE_CXX11
       typedef typename _Codecvt::state_type 			   state_type;
       typedef typename wide_string::traits_type::int_type	   int_type;
 
-      /** Default constructor.
+      /// Default constructor.
+      wstring_convert() : _M_cvt(new _Codecvt()) { }
+
+      /** Constructor.
        *
        * @param  __pcvt The facet to use for conversions.
        *
        * Takes ownership of @p __pcvt and will delete it in the destructor.
        */
       explicit
-      wstring_convert(_Codecvt* __pcvt = new _Codecvt()) : _M_cvt(__pcvt)
+      wstring_convert(_Codecvt* __pcvt) : _M_cvt(__pcvt)
       {
 	if (!_M_cvt)
 	  __throw_logic_error("wstring_convert");
@@ -325,7 +328,10 @@ _GLIBCXX_END_NAMESPACE_CXX11
     public:
       typedef typename _Codecvt::state_type state_type;
 
-      /** Default constructor.
+      /// Default constructor.
+      wbuffer_convert() : wbuffer_convert(nullptr) { }
+
+      /** Constructor.
        *
        * @param  __bytebuf The underlying byte stream buffer.
        * @param  __pcvt    The facet to use for conversions.
@@ -334,7 +340,7 @@ _GLIBCXX_END_NAMESPACE_CXX11
        * Takes ownership of @p __pcvt and will delete it in the destructor.
        */
       explicit
-      wbuffer_convert(streambuf* __bytebuf = 0, _Codecvt* __pcvt = new _Codecvt,
+      wbuffer_convert(streambuf* __bytebuf, _Codecvt* __pcvt = new _Codecvt,
 		      state_type __state = state_type())
       : _M_buf(__bytebuf), _M_cvt(__pcvt), _M_state(__state)
       {
@@ -431,7 +437,7 @@ _GLIBCXX_END_NAMESPACE_CXX11
 	streamsize __nbytes = sizeof(_M_get_buf) - _M_unconv;
 	__nbytes = std::min(__nbytes, _M_buf->in_avail());
 	if (__nbytes < 1)
-	  __nbytes == 1;
+	  __nbytes = 1;
 	__nbytes = _M_buf->sgetn(_M_get_buf + _M_unconv, __nbytes);
 	if (__nbytes < 1)
 	  return false;

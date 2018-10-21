@@ -5,6 +5,7 @@
 package os
 
 import (
+	"internal/poll"
 	"io"
 	"runtime"
 	"syscall"
@@ -28,6 +29,7 @@ type file struct {
 
 // Fd returns the integer Plan 9 file descriptor referencing the open file.
 // The file descriptor is valid only until f.Close is called or f is garbage collected.
+// On Unix systems this will cause the SetDeadline methods to stop working.
 func (f *File) Fd() uintptr {
 	if f == nil {
 		return ^(uintptr(0))
@@ -77,12 +79,8 @@ func syscallMode(i FileMode) (o uint32) {
 	return
 }
 
-// OpenFile is the generalized open call; most users will use Open
-// or Create instead. It opens the named file with specified flag
-// (O_RDONLY etc.) and perm, (0666 etc.) if applicable. If successful,
-// methods on the returned File can be used for I/O.
-// If there is an error, it will be of type *PathError.
-func OpenFile(name string, flag int, perm FileMode) (*File, error) {
+// openFileNolog is the Plan 9 implementation of OpenFile.
+func openFileNolog(name string, flag int, perm FileMode) (*File, error) {
 	var (
 		fd     int
 		e      error
@@ -135,7 +133,8 @@ func OpenFile(name string, flag int, perm FileMode) (*File, error) {
 }
 
 // Close closes the File, rendering it unusable for I/O.
-// It returns an error, if any.
+// On files that support SetDeadline, any pending I/O operations will
+// be canceled and return immediately with an error.
 func (f *File) Close() error {
 	if err := f.checkValid("close"); err != nil {
 		return err
@@ -453,7 +452,11 @@ func Readlink(name string) (string, error) {
 
 // Chown changes the numeric uid and gid of the named file.
 // If the file is a symbolic link, it changes the uid and gid of the link's target.
+// A uid or gid of -1 means to not change that value.
 // If there is an error, it will be of type *PathError.
+//
+// On Windows or Plan 9, Chown always returns the syscall.EWINDOWS or
+// EPLAN9 error, wrapped in *PathError.
 func Chown(name string, uid, gid int) error {
 	return &PathError{"chown", name, syscall.EPLAN9}
 }
@@ -475,7 +478,12 @@ func (f *File) Chown(uid, gid int) error {
 }
 
 func tempDir() string {
-	return "/tmp"
+	dir := Getenv("TMPDIR")
+	if dir == "" {
+		dir = "/tmp"
+	}
+	return dir
+
 }
 
 // Chdir changes the current working directory to the file,
@@ -489,6 +497,30 @@ func (f *File) Chdir() error {
 		return &PathError{"chdir", f.name, e}
 	}
 	return nil
+}
+
+// setDeadline sets the read and write deadline.
+func (f *File) setDeadline(time.Time) error {
+	if err := f.checkValid("SetDeadline"); err != nil {
+		return err
+	}
+	return poll.ErrNoDeadline
+}
+
+// setReadDeadline sets the read deadline.
+func (f *File) setReadDeadline(time.Time) error {
+	if err := f.checkValid("SetReadDeadline"); err != nil {
+		return err
+	}
+	return poll.ErrNoDeadline
+}
+
+// setWriteDeadline sets the write deadline.
+func (f *File) setWriteDeadline(time.Time) error {
+	if err := f.checkValid("SetWriteDeadline"); err != nil {
+		return err
+	}
+	return poll.ErrNoDeadline
 }
 
 // checkValid checks whether f is valid for use.

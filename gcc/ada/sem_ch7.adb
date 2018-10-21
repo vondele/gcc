@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2017, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2018, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -199,7 +199,7 @@ package body Sem_Ch7 is
    subtype Entity_Header_Num is Integer range 0 .. Entity_Table_Size - 1;
    --  Range of headers in hash table
 
-   function Entity_Hash (Id : Entity_Id) return Entity_Header_Num;
+   function Node_Hash (Id : Entity_Id) return Entity_Header_Num;
    --  Simple hash function for Entity_Ids
 
    package Subprogram_Table is new GNAT.Htable.Simple_HTable
@@ -207,19 +207,29 @@ package body Sem_Ch7 is
       Element    => Boolean,
       No_Element => False,
       Key        => Entity_Id,
-      Hash       => Entity_Hash,
+      Hash       => Node_Hash,
       Equal      => "=");
    --  Hash table to record which subprograms are referenced. It is declared
    --  at library level to avoid elaborating it for every call to Analyze.
 
+   package Traversed_Table is new GNAT.Htable.Simple_HTable
+     (Header_Num => Entity_Header_Num,
+      Element    => Boolean,
+      No_Element => False,
+      Key        => Node_Id,
+      Hash       => Node_Hash,
+      Equal      => "=");
+   --  Hash table to record which nodes we have traversed, so we can avoid
+   --  traversing the same nodes repeatedly.
+
    -----------------
-   -- Entity_Hash --
+   -- Node_Hash --
    -----------------
 
-   function Entity_Hash (Id : Entity_Id) return Entity_Header_Num is
+   function Node_Hash (Id : Entity_Id) return Entity_Header_Num is
    begin
       return Entity_Header_Num (Id mod Entity_Table_Size);
-   end Entity_Hash;
+   end Node_Hash;
 
    ---------------------------------
    -- Analyze_Package_Body_Helper --
@@ -249,37 +259,44 @@ package body Sem_Ch7 is
 
       procedure Hide_Public_Entities (Decls : List_Id) is
          function Has_Referencer
-           (Decls     : List_Id;
-            Top_Level : Boolean := False) return Boolean;
+           (Decls                                   : List_Id;
+            In_Nested_Instance                      : Boolean;
+            Has_Outer_Referencer_Of_Non_Subprograms : Boolean) return Boolean;
          --  A "referencer" is a construct which may reference a previous
          --  declaration. Examine all declarations in list Decls in reverse
-         --  and determine whether once such referencer exists. All entities
+         --  and determine whether one such referencer exists. All entities
          --  in the range Last (Decls) .. Referencer are hidden from external
          --  visibility.
 
          function Scan_Subprogram_Ref (N : Node_Id) return Traverse_Result;
          --  Determine whether a node denotes a reference to a subprogram
 
-         procedure Scan_Subprogram_Refs is
+         procedure Traverse_And_Scan_Subprogram_Refs is
            new Traverse_Proc (Scan_Subprogram_Ref);
          --  Subsidiary to routine Has_Referencer. Determine whether a node
          --  contains references to a subprogram and record them.
          --  WARNING: this is a very expensive routine as it performs a full
          --  tree traversal.
 
+         procedure Scan_Subprogram_Refs (Node : Node_Id);
+         --  If we haven't already traversed Node, then mark it and traverse
+         --  it.
+
          --------------------
          -- Has_Referencer --
          --------------------
 
          function Has_Referencer
-           (Decls     : List_Id;
-            Top_Level : Boolean := False) return Boolean
+           (Decls                                   : List_Id;
+            In_Nested_Instance                      : Boolean;
+            Has_Outer_Referencer_Of_Non_Subprograms : Boolean) return Boolean
          is
             Decl    : Node_Id;
             Decl_Id : Entity_Id;
             Spec    : Node_Id;
 
-            Has_Non_Subprograms_Referencer : Boolean := False;
+            Has_Referencer_Of_Non_Subprograms : Boolean :=
+                                       Has_Outer_Referencer_Of_Non_Subprograms;
             --  Set if an inlined subprogram body was detected as a referencer.
             --  In this case, we do not return True immediately but keep hiding
             --  subprograms from external visibility.
@@ -305,13 +322,23 @@ package body Sem_Ch7 is
 
                elsif Nkind (Decl) = N_Package_Declaration then
                   Spec := Specification (Decl);
+                  Decl_Id := Defining_Entity (Spec);
 
                   --  Inspect the declarations of a non-generic package to try
                   --  and hide more entities from external visibility.
 
-                  if not Is_Generic_Unit (Defining_Entity (Spec)) then
-                     if Has_Referencer (Private_Declarations (Spec))
-                       or else Has_Referencer (Visible_Declarations (Spec))
+                  if not Is_Generic_Unit (Decl_Id) then
+                     if Has_Referencer (Private_Declarations (Spec),
+                                        In_Nested_Instance
+                                          or else
+                                        Is_Generic_Instance (Decl_Id),
+                                        Has_Referencer_Of_Non_Subprograms)
+                       or else
+                        Has_Referencer (Visible_Declarations (Spec),
+                                        In_Nested_Instance
+                                          or else
+                                        Is_Generic_Instance (Decl_Id),
+                                        Has_Referencer_Of_Non_Subprograms)
                      then
                         return True;
                      end if;
@@ -340,7 +367,12 @@ package body Sem_Ch7 is
                   --  Inspect the declarations of a non-generic package body to
                   --  try and hide more entities from external visibility.
 
-                  elsif Has_Referencer (Declarations (Decl)) then
+                  elsif Has_Referencer (Declarations (Decl),
+                                        In_Nested_Instance
+                                          or else
+                                        Is_Generic_Instance (Decl_Id),
+                                        Has_Referencer_Of_Non_Subprograms)
+                  then
                      return True;
                   end if;
 
@@ -368,7 +400,7 @@ package body Sem_Ch7 is
                      if Is_Inlined (Decl_Id)
                        or else Has_Pragma_Inline (Decl_Id)
                      then
-                        Has_Non_Subprograms_Referencer := True;
+                        Has_Referencer_Of_Non_Subprograms := True;
 
                         --  Inspect the statements of the subprogram body
                         --  to determine whether the body references other
@@ -387,7 +419,7 @@ package body Sem_Ch7 is
                      if Is_Inlined (Decl_Id)
                        or else Has_Pragma_Inline (Decl_Id)
                      then
-                        Has_Non_Subprograms_Referencer := True;
+                        Has_Referencer_Of_Non_Subprograms := True;
 
                         --  Inspect the statements of the subprogram body
                         --  to determine whether the body references other
@@ -409,17 +441,28 @@ package body Sem_Ch7 is
                      Discard : Boolean;
                      pragma Unreferenced (Discard);
                   begin
-                     --  Inspect the actions to find references to subprograms
+                     --  Inspect the actions to find references to subprograms.
+                     --  We assume that the actions do not contain other kinds
+                     --  of references and, therefore, we do not stop the scan
+                     --  or set Has_Referencer_Of_Non_Subprograms here. Doing
+                     --  it would pessimize common cases for which the actions
+                     --  contain the declaration of an init procedure, since
+                     --  such a procedure is automatically marked inline.
 
-                     Discard := Has_Referencer (Actions (Decl));
+                     Discard :=
+                       Has_Referencer (Actions (Decl),
+                                       In_Nested_Instance,
+                                       Has_Referencer_Of_Non_Subprograms);
                   end;
 
                --  Exceptions, objects and renamings do not need to be public
                --  if they are not followed by a construct which can reference
-               --  and export them. The Is_Public flag is reset on top level
-               --  entities only as anything nested is local to its context.
-               --  Likewise for subprograms, but we work harder for them.
-
+               --  and export them. Likewise for subprograms but we work harder
+               --  for them to see whether they are referenced on an individual
+               --  basis by looking into the table of referenced subprograms.
+               --  But we cannot say anything for entities declared in nested
+               --  instances because instantiations are not done yet so the
+               --  bodies are not visible and could contain references to them.
                elsif Nkind_In (Decl, N_Exception_Declaration,
                                      N_Object_Declaration,
                                      N_Object_Renaming_Declaration,
@@ -428,12 +471,13 @@ package body Sem_Ch7 is
                then
                   Decl_Id := Defining_Entity (Decl);
 
-                  if Top_Level
+                  if not In_Nested_Instance
                     and then not Is_Imported (Decl_Id)
                     and then not Is_Exported (Decl_Id)
                     and then No (Interface_Name (Decl_Id))
                     and then
-                      (not Has_Non_Subprograms_Referencer
+                      ((Nkind (Decl) /= N_Subprogram_Declaration
+                         and then not Has_Referencer_Of_Non_Subprograms)
                         or else (Nkind (Decl) = N_Subprogram_Declaration
                                   and then not Subprogram_Table.Get (Decl_Id)))
                   then
@@ -461,7 +505,7 @@ package body Sem_Ch7 is
                Prev (Decl);
             end loop;
 
-            return Has_Non_Subprograms_Referencer;
+            return Has_Referencer_Of_Non_Subprograms;
          end Has_Referencer;
 
          -------------------------
@@ -510,6 +554,18 @@ package body Sem_Ch7 is
 
             return OK;
          end Scan_Subprogram_Ref;
+
+         --------------------------
+         -- Scan_Subprogram_Refs --
+         --------------------------
+
+         procedure Scan_Subprogram_Refs (Node : Node_Id) is
+         begin
+            if not Traversed_Table.Get (Node) then
+               Traversed_Table.Set (Node, True);
+               Traverse_And_Scan_Subprogram_Refs (Node);
+            end if;
+         end Scan_Subprogram_Refs;
 
          --  Local variables
 
@@ -581,8 +637,9 @@ package body Sem_Ch7 is
          --  actual parameters of the instantiations matter here, and they are
          --  present in the declarations list of the instantiated packages.
 
+         Traversed_Table.Reset;
          Subprogram_Table.Reset;
-         Discard := Has_Referencer (Decls, Top_Level => True);
+         Discard := Has_Referencer (Decls, False, False);
       end Hide_Public_Entities;
 
       ----------------------------------
@@ -611,6 +668,7 @@ package body Sem_Ch7 is
       --  Local variables
 
       Saved_GM   : constant Ghost_Mode_Type := Ghost_Mode;
+      Saved_IGR  : constant Node_Id         := Ignored_Ghost_Region;
       Saved_ISMP : constant Boolean         :=
                      Ignore_SPARK_Mode_Pragmas_In_Instance;
       --  Save the Ghost and SPARK mode-related data to restore on exit
@@ -680,9 +738,9 @@ package body Sem_Ch7 is
          end if;
       end if;
 
-      --  A [generic] package body "freezes" the contract of the nearest
-      --  enclosing package body and all other contracts encountered in the
-      --  same declarative part up to and excluding the package body:
+      --  A [generic] package body freezes the contract of the nearest
+      --  enclosing package body and all other contracts encountered in
+      --  the same declarative part up to and excluding the package body:
 
       --    package body Nearest_Enclosing_Package
       --      with Refined_State => (State => Constit)
@@ -699,21 +757,21 @@ package body Sem_Ch7 is
 
       --  This ensures that any annotations referenced by the contract of a
       --  [generic] subprogram body declared within the current package body
-      --  are available. This form of "freezing" is decoupled from the usual
+      --  are available. This form of freezing is decoupled from the usual
       --  Freeze_xxx mechanism because it must also work in the context of
       --  generics where normal freezing is disabled.
 
-      --  Only bodies coming from source should cause this type of "freezing".
+      --  Only bodies coming from source should cause this type of freezing.
       --  Instantiated generic bodies are excluded because their processing is
       --  performed in a separate compilation pass which lacks enough semantic
       --  information with respect to contract analysis. It is safe to suppress
-      --  the "freezing" of contracts in this case because this action already
+      --  the freezing of contracts in this case because this action already
       --  took place at the end of the enclosing declarative part.
 
       if Comes_From_Source (N)
         and then not Is_Generic_Instance (Spec_Id)
       then
-         Analyze_Previous_Contracts (N);
+         Freeze_Previous_Contracts (N);
       end if;
 
       --  A package body is Ghost when the corresponding spec is Ghost. Set
@@ -721,6 +779,12 @@ package body Sem_Ch7 is
       --  expansion are properly flagged as ignored Ghost.
 
       Mark_And_Set_Ghost_Body (N, Spec_Id);
+
+      --  If the body completes the initial declaration of a compilation unit
+      --  which is subject to pragma Elaboration_Checks, set the model of the
+      --  pragma because it applies to all parts of the unit.
+
+      Install_Elaboration_Model (Spec_Id);
 
       Set_Is_Compilation_Unit (Body_Id, Is_Compilation_Unit (Spec_Id));
       Style.Check_Identifier (Body_Id, Spec_Id);
@@ -849,10 +913,6 @@ package body Sem_Ch7 is
          Declare_Inherited_Private_Subprograms (Spec_Id);
       end if;
 
-      --  A package body "freezes" the contract of its initial declaration.
-      --  This analysis depends on attribute Corresponding_Spec being set. Only
-      --  bodies coming from source shuld cause this type of "freezing".
-
       if Present (Declarations (N)) then
          Analyze_Declarations (Declarations (N));
          Inspect_Deferred_Constant_Completion (Declarations (N));
@@ -945,6 +1005,7 @@ package body Sem_Ch7 is
          Set_Last_Entity  (Spec_Id, Empty);
       end if;
 
+      Update_Use_Clause_Chain;
       End_Package_Scope (Spec_Id);
 
       --  All entities declared in body are not visible
@@ -1015,7 +1076,7 @@ package body Sem_Ch7 is
       end if;
 
       Ignore_SPARK_Mode_Pragmas_In_Instance := Saved_ISMP;
-      Restore_Ghost_Mode (Saved_GM);
+      Restore_Ghost_Region (Saved_GM, Saved_IGR);
    end Analyze_Package_Body_Helper;
 
    ---------------------------------
@@ -1120,14 +1181,12 @@ package body Sem_Ch7 is
          end if;
       end if;
 
+      --  Set Body_Required indication on the compilation unit node
+
       if Is_Comp_Unit then
-
-         --  Set Body_Required indication on the compilation unit node, and
-         --  determine whether elaboration warnings may be meaningful on it.
-
          Set_Body_Required (Parent (N), Body_Required);
 
-         if not Body_Required then
+         if Legacy_Elaboration_Checks and not Body_Required then
             Set_Suppress_Elaboration_Warnings (Id);
          end if;
       end if;
@@ -1377,10 +1436,13 @@ package body Sem_Ch7 is
 
             --  We are looking at an incomplete or private type declaration
             --  with a known_discriminant_part whose full view is an
-            --  Unchecked_Union.
+            --  Unchecked_Union. The seemingly useless check with Is_Type
+            --  prevents cascaded errors when routines defined only for type
+            --  entities are called with non-type entities.
 
             if Nkind_In (Decl, N_Incomplete_Type_Declaration,
                                N_Private_Type_Declaration)
+              and then Is_Type (Defining_Identifier (Decl))
               and then Has_Discriminants (Defining_Identifier (Decl))
               and then Present (Full_View (Defining_Identifier (Decl)))
               and then
@@ -1796,6 +1858,18 @@ package body Sem_Ch7 is
       then
          Unit_Requires_Body_Info (Id);
       end if;
+
+      --  Nested package specs that do not require bodies are not checked for
+      --  ineffective use clauses due to the possbility of subunits. This is
+      --  because at this stage it is impossible to tell whether there will be
+      --  a separate body.
+
+      if not Unit_Requires_Body (Id)
+        and then Is_Compilation_Unit (Id)
+        and then not Is_Private_Descendant (Id)
+      then
+         Update_Use_Clause_Chain;
+      end if;
    end Analyze_Package_Specification;
 
    --------------------------------------
@@ -1819,6 +1893,11 @@ package body Sem_Ch7 is
 
       New_Private_Type (N, Id, N);
       Set_Depends_On_Private (Id);
+
+      --  Set the SPARK mode from the current context
+
+      Set_SPARK_Pragma           (Id, SPARK_Mode_Pragma);
+      Set_SPARK_Pragma_Inherited (Id);
 
       if Has_Aspects (N) then
          Analyze_Aspect_Specifications (N, Id);
@@ -2110,12 +2189,12 @@ package body Sem_Ch7 is
 
       Exchange_Entities (Id, Full_Id);
 
-      Set_Next_Entity (Id, Next1);
-      Set_Homonym     (Id, H1);
+      Link_Entities (Id, Next1);
+      Set_Homonym   (Id, H1);
 
-      Set_Full_View   (Full_Id, Id);
-      Set_Next_Entity (Full_Id, Next2);
-      Set_Homonym     (Full_Id, H2);
+      Set_Full_View (Full_Id, Id);
+      Link_Entities (Full_Id, Next2);
+      Set_Homonym   (Full_Id, H2);
    end Exchange_Declarations;
 
    ----------------------------

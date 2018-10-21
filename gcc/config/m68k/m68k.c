@@ -1,5 +1,5 @@
 /* Subroutines for insn-output.c for Motorola 68000 family.
-   Copyright (C) 1987-2017 Free Software Foundation, Inc.
+   Copyright (C) 1987-2018 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -16,6 +16,8 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with GCC; see the file COPYING3.  If not see
 <http://www.gnu.org/licenses/>.  */
+
+#define IN_TARGET_CODE 1
 
 #include "config.h"
 #include "system.h"
@@ -63,6 +65,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "optabs.h"
 #include "builtins.h"
 #include "rtl-iter.h"
+#include "toplev.h"
 
 /* This file should be included last.  */
 #include "target-def.h"
@@ -176,7 +179,7 @@ static bool m68k_return_in_memory (const_tree, const_tree);
 #endif
 static void m68k_output_dwarf_dtprel (FILE *, int, rtx) ATTRIBUTE_UNUSED;
 static void m68k_trampoline_init (rtx, tree, rtx);
-static int m68k_return_pops_args (tree, tree, int);
+static poly_int64 m68k_return_pops_args (tree, tree, poly_int64);
 static rtx m68k_delegitimize_address (rtx);
 static void m68k_function_arg_advance (cumulative_args_t, machine_mode,
 				       const_tree, bool);
@@ -190,6 +193,8 @@ m68k_excess_precision (enum excess_precision_type);
 static unsigned int m68k_hard_regno_nregs (unsigned int, machine_mode);
 static bool m68k_hard_regno_mode_ok (unsigned int, machine_mode);
 static bool m68k_modes_tieable_p (machine_mode, machine_mode);
+static machine_mode m68k_promote_function_mode (const_tree, machine_mode,
+						int *, const_tree, int);
 
 /* Initialize the GCC target structure.  */
 
@@ -345,17 +350,23 @@ static bool m68k_modes_tieable_p (machine_mode, machine_mode);
 #undef TARGET_MODES_TIEABLE_P
 #define TARGET_MODES_TIEABLE_P m68k_modes_tieable_p
 
+#undef TARGET_PROMOTE_FUNCTION_MODE
+#define TARGET_PROMOTE_FUNCTION_MODE m68k_promote_function_mode
+
+#undef  TARGET_HAVE_SPECULATION_SAFE_VALUE
+#define TARGET_HAVE_SPECULATION_SAFE_VALUE speculation_safe_value_not_needed
+
 static const struct attribute_spec m68k_attribute_table[] =
 {
-  /* { name, min_len, max_len, decl_req, type_req, fn_type_req, handler,
-       affects_type_identity } */
-  { "interrupt", 0, 0, true,  false, false, m68k_handle_fndecl_attribute,
-    false },
-  { "interrupt_handler", 0, 0, true,  false, false,
-    m68k_handle_fndecl_attribute, false },
-  { "interrupt_thread", 0, 0, true,  false, false,
-    m68k_handle_fndecl_attribute, false },
-  { NULL,                0, 0, false, false, false, NULL, false }
+  /* { name, min_len, max_len, decl_req, type_req, fn_type_req,
+       affects_type_identity, handler, exclude } */
+  { "interrupt", 0, 0, true,  false, false, false,
+    m68k_handle_fndecl_attribute, NULL },
+  { "interrupt_handler", 0, 0, true,  false, false, false,
+    m68k_handle_fndecl_attribute, NULL },
+  { "interrupt_thread", 0, 0, true,  false, false, false,
+    m68k_handle_fndecl_attribute, NULL },
+  { NULL, 0, 0, false, false, false, false, NULL, NULL }
 };
 
 struct gcc_target targetm = TARGET_INITIALIZER;
@@ -644,15 +655,19 @@ m68k_option_override (void)
     }
 
 #ifndef ASM_OUTPUT_ALIGN_WITH_NOP
-  if (align_labels > 2)
+  parse_alignment_opts ();
+  int label_alignment = align_labels.levels[0].get_value ();
+  if (label_alignment > 2)
     {
-      warning (0, "-falign-labels=%d is not supported", align_labels);
-      align_labels = 0;
+      warning (0, "-falign-labels=%d is not supported", label_alignment);
+      str_align_labels = "1";
     }
-  if (align_loops > 2)
+
+  int loop_alignment = align_loops.levels[0].get_value ();
+  if (loop_alignment > 2)
     {
-      warning (0, "-falign-loops=%d is not supported", align_loops);
-      align_loops = 0;
+      warning (0, "-falign-loops=%d is not supported", loop_alignment);
+      str_align_loops = "1";
     }
 #endif
 
@@ -2314,14 +2329,11 @@ m68k_unwrap_symbol (rtx orig, bool unwrap_reloc32_p)
   return m68k_unwrap_symbol_1 (orig, unwrap_reloc32_p, NULL);
 }
 
-/* Prescan insn before outputing assembler for it.  */
+/* Adjust decorated address operand before outputing assembler for it.  */
 
-void
-m68k_final_prescan_insn (rtx_insn *insn ATTRIBUTE_UNUSED,
-			 rtx *operands, int n_operands)
+static void
+m68k_adjust_decorated_operand (rtx op)
 {
-  int i;
-
   /* Combine and, possibly, other optimizations may do good job
      converting
        (const (unspec [(symbol)]))
@@ -2340,45 +2352,38 @@ m68k_final_prescan_insn (rtx_insn *insn ATTRIBUTE_UNUSED,
      to patch up anything outside of the operand.  */
 
   subrtx_var_iterator::array_type array;
-  for (i = 0; i < n_operands; ++i)
+  FOR_EACH_SUBRTX_VAR (iter, array, op, ALL)
     {
-      rtx op;
-
-      op = operands[i];
-
-      FOR_EACH_SUBRTX_VAR (iter, array, op, ALL)
+      rtx x = *iter;
+      if (m68k_unwrap_symbol (x, true) != x)
 	{
-	  rtx x = *iter;
-	  if (m68k_unwrap_symbol (x, true) != x)
+	  rtx plus;
+
+	  gcc_assert (GET_CODE (x) == CONST);
+	  plus = XEXP (x, 0);
+
+	  if (GET_CODE (plus) == PLUS || GET_CODE (plus) == MINUS)
 	    {
-	      rtx plus;
+	      rtx unspec;
+	      rtx addend;
 
-	      gcc_assert (GET_CODE (x) == CONST);
-	      plus = XEXP (x, 0);
+	      unspec = XEXP (plus, 0);
+	      gcc_assert (GET_CODE (unspec) == UNSPEC);
+	      addend = XEXP (plus, 1);
+	      gcc_assert (CONST_INT_P (addend));
 
-	      if (GET_CODE (plus) == PLUS || GET_CODE (plus) == MINUS)
-		{
-		  rtx unspec;
-		  rtx addend;
+	      /* We now have all the pieces, rearrange them.  */
 
-		  unspec = XEXP (plus, 0);
-		  gcc_assert (GET_CODE (unspec) == UNSPEC);
-		  addend = XEXP (plus, 1);
-		  gcc_assert (CONST_INT_P (addend));
+	      /* Move symbol to plus.  */
+	      XEXP (plus, 0) = XVECEXP (unspec, 0, 0);
 
-		  /* We now have all the pieces, rearrange them.  */
+	      /* Move plus inside unspec.  */
+	      XVECEXP (unspec, 0, 0) = plus;
 
-		  /* Move symbol to plus.  */
-		  XEXP (plus, 0) = XVECEXP (unspec, 0, 0);
-
-		  /* Move plus inside unspec.  */
-		  XVECEXP (unspec, 0, 0) = plus;
-
-		  /* Move unspec to top level of const.  */
-		  XEXP (x, 0) = unspec;
-		}
-	      iter.skip_subrtxes ();
+	      /* Move unspec to top level of const.  */
+	      XEXP (x, 0) = unspec;
 	    }
+	  iter.skip_subrtxes ();
 	}
     }
 }
@@ -3481,7 +3486,6 @@ handle_move_double (rtx operands[2],
 
   /* Normal case: do the two words, low-numbered first.  */
 
-  m68k_final_prescan_insn (NULL, operands, 2);
   handle_movsi (operands);
 
   /* Do the middle one of the three words for long double */
@@ -3492,7 +3496,6 @@ handle_move_double (rtx operands[2],
       if (addreg1)
 	handle_reg_adjust (addreg1, 4);
 
-      m68k_final_prescan_insn (NULL, middlehalf, 2);
       handle_movsi (middlehalf);
     }
 
@@ -3503,7 +3506,6 @@ handle_move_double (rtx operands[2],
     handle_reg_adjust (addreg1, 4);
 
   /* Do that word.  */
-  m68k_final_prescan_insn (NULL, latehalf, 2);
   handle_movsi (latehalf);
 
   /* Undo the adds we just did.  */
@@ -3521,8 +3523,7 @@ output_reg_adjust (rtx reg, int n)
 {
   const char *s;
 
-  gcc_assert (GET_MODE (reg) == SImode
-	      && -12 <= n && n != 0 && n <= 12);
+  gcc_assert (GET_MODE (reg) == SImode && n >= -12 && n != 0 && n <= 12);
 
   switch (n)
     {
@@ -3564,8 +3565,7 @@ emit_reg_adjust (rtx reg1, int n)
 {
   rtx reg2;
 
-  gcc_assert (GET_MODE (reg1) == SImode
-	      && -12 <= n && n != 0 && n <= 12);
+  gcc_assert (GET_MODE (reg1) == SImode && n >= -12 && n != 0 && n <= 12);
 
   reg1 = copy_rtx (reg1);
   reg2 = copy_rtx (reg1);
@@ -4451,6 +4451,9 @@ floating_exact_log2 (rtx x)
 void
 print_operand (FILE *file, rtx op, int letter)
 {
+  if (op != NULL_RTX)
+    m68k_adjust_decorated_operand (op);
+
   if (letter == '.')
     {
       if (MOTOROLA)
@@ -4698,6 +4701,8 @@ void
 print_operand_address (FILE *file, rtx addr)
 {
   struct m68k_address address;
+
+  m68k_adjust_decorated_operand (addr);
 
   if (!m68k_decompose_address (QImode, addr, true, &address))
     gcc_unreachable ();
@@ -6531,14 +6536,14 @@ m68k_trampoline_init (rtx m_tramp, tree fndecl, rtx chain_value)
    standard Unix calling sequences.  If the option is not selected,
    the caller must always pop the args.  */
 
-static int
-m68k_return_pops_args (tree fundecl, tree funtype, int size)
+static poly_int64
+m68k_return_pops_args (tree fundecl, tree funtype, poly_int64 size)
 {
   return ((TARGET_RTD
 	   && (!fundecl
 	       || TREE_CODE (fundecl) != IDENTIFIER_NODE)
 	   && (!stdarg_p (funtype)))
-	  ? size : 0);
+	  ? (HOST_WIDE_INT) size : 0);
 }
 
 /* Make sure everything's fine if we *don't* have a given processor.
@@ -6608,6 +6613,33 @@ m68k_excess_precision (enum excess_precision_type type)
 	gcc_unreachable ();
     }
   return FLT_EVAL_METHOD_UNPREDICTABLE;
+}
+
+/* Implement PUSH_ROUNDING.  On the 680x0, sp@- in a byte insn really pushes
+   a word.  On the ColdFire, sp@- in a byte insn pushes just a byte.  */
+
+poly_int64
+m68k_push_rounding (poly_int64 bytes)
+{
+  if (TARGET_COLDFIRE)
+    return bytes;
+  return (bytes + 1) & ~1;
+}
+
+/* Implement TARGET_PROMOTE_FUNCTION_MODE.  */
+
+static machine_mode
+m68k_promote_function_mode (const_tree type, machine_mode mode,
+                            int *punsignedp ATTRIBUTE_UNUSED,
+                            const_tree fntype ATTRIBUTE_UNUSED,
+                            int for_return)
+{
+  /* Promote libcall arguments narrower than int to match the normal C
+     ABI (for which promotions are handled via
+     TARGET_PROMOTE_PROTOTYPES).  */
+  if (type == NULL_TREE && !for_return && (mode == QImode || mode == HImode))
+    return SImode;
+  return mode;
 }
 
 #include "gt-m68k.h"

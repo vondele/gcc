@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
-<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8" /><title>Bugs</title><meta name="generator" content="DocBook XSL-NS Stylesheets V1.78.1" /><meta name="keywords" content="ISO C++, library" /><meta name="keywords" content="ISO C++, runtime, library" /><link rel="home" href="../index.html" title="The GNU C++ Library" /><link rel="up" href="status.html" title="Chapter 1. Status" /><link rel="prev" href="license.html" title="License" /><link rel="next" href="setup.html" title="Chapter 2. Setup" /></head><body><div class="navheader"><table width="100%" summary="Navigation header"><tr><th colspan="3" align="center">Bugs</th></tr><tr><td width="20%" align="left"><a accesskey="p" href="license.html">Prev</a> </td><th width="60%" align="center">Chapter 1. Status</th><td width="20%" align="right"> <a accesskey="n" href="setup.html">Next</a></td></tr></table><hr /></div><div class="section"><div class="titlepage"><div><div><h2 class="title" style="clear: both"><a id="manual.intro.status.bugs"></a>Bugs</h2></div></div></div><div class="section"><div class="titlepage"><div><div><h3 class="title"><a id="manual.intro.status.bugs.impl"></a>Implementation Bugs</h3></div></div></div><p>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8" /><title>Bugs</title><meta name="generator" content="DocBook XSL Stylesheets Vsnapshot" /><meta name="keywords" content="ISO C++, library" /><meta name="keywords" content="ISO C++, runtime, library" /><link rel="home" href="../index.html" title="The GNU C++ Library" /><link rel="up" href="status.html" title="Chapter 1. Status" /><link rel="prev" href="license.html" title="License" /><link rel="next" href="setup.html" title="Chapter 2. Setup" /></head><body><div class="navheader"><table width="100%" summary="Navigation header"><tr><th colspan="3" align="center">Bugs</th></tr><tr><td width="20%" align="left"><a accesskey="p" href="license.html">Prev</a> </td><th width="60%" align="center">Chapter 1. Status</th><td width="20%" align="right"> <a accesskey="n" href="setup.html">Next</a></td></tr></table><hr /></div><div class="section"><div class="titlepage"><div><div><h2 class="title" style="clear: both"><a id="manual.intro.status.bugs"></a>Bugs</h2></div></div></div><div class="section"><div class="titlepage"><div><div><h3 class="title"><a id="manual.intro.status.bugs.impl"></a>Implementation Bugs</h3></div></div></div><p>
       Information on known bugs, details on efforts to fix them, and
       fixed bugs are all available as part of the <a class="link" href="https://gcc.gnu.org/bugs/" target="_top">GCC bug tracking system</a>,
       under the component <span class="quote">“<span class="quote">libstdc++</span>”</span>.
@@ -136,6 +136,14 @@
     </p></dd><dt><a id="manual.bugs.dr195"></a><span class="term"><a class="link" href="http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-defects.html#195" target="_top">195</a>:
 	<span class="emphasis"><em>Should basic_istream::sentry's constructor ever set eofbit?</em></span>
     </span></dt><dd><p>Yes, it can, specifically if EOF is reached while skipping whitespace.
+    </p></dd><dt><a id="manual.bugs.dr206"></a><span class="term"><a class="link" href="http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-defects.html#206" target="_top">206</a>:
+	<span class="emphasis"><em><code class="code">operator new(size_t, nothrow)</code> may become
+          unlinked to ordinary <code class="code">operator new</code> if ordinary
+          version replaced
+        </em></span>
+    </span></dt><dd><p>The <code class="code">nothrow</code> forms of new and delete were
+      changed to call the throwing forms, handling any exception by
+      catching it and returning a null pointer.
     </p></dd><dt><a id="manual.bugs.dr211"></a><span class="term"><a class="link" href="http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-defects.html#211" target="_top">211</a>:
 	<span class="emphasis"><em>operator&gt;&gt;(istream&amp;, string&amp;) doesn't set failbit</em></span>
     </span></dt><dd><p>If nothing is extracted into the string, <code class="code">op&gt;&gt;</code> now
@@ -418,6 +426,9 @@
 	<span class="emphasis"><em><code class="code">std::addressof</code> should be constexpr</em></span>
     </span></dt><dd><p>Use <code class="code">__builtin_addressof</code> and add
     <code class="code">constexpr</code> to <code class="code">addressof</code> for C++17 and later.
+    </p></dd><dt><a id="manual.bugs.dr2306"></a><span class="term"><a class="link" href="http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-defects.html#2306" target="_top">2306</a>:
+	<span class="emphasis"><em><code class="code">match_results::reference</code> should be <code class="code">value_type&amp;</code>, not <code class="code">const value_type&amp;</code></em></span>
+    </span></dt><dd><p>Change typedef.
     </p></dd><dt><a id="manual.bugs.dr2313"></a><span class="term"><a class="link" href="http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-defects.html#2313" target="_top">2313</a>:
 	<span class="emphasis"><em><code class="code">tuple_size</code> should always derive from <code class="code">integral_constant&lt;size_t, N&gt;</code></em></span>
     </span></dt><dd><p>Update definitions of the partial specializations for const and volatile types.
@@ -430,6 +441,9 @@
     </p></dd><dt><a id="manual.bugs.dr2332"></a><span class="term"><a class="link" href="http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-defects.html#2332" target="_top">2332</a>:
        <span class="emphasis"><em><code class="code">regex_iterator/regex_token_iterator</code> should forbid temporary regexes</em></span>
     </span></dt><dd><p>Add deleted constructors.
+    </p></dd><dt><a id="manual.bugs.dr2354"></a><span class="term"><a class="link" href="http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-defects.html#2354" target="_top">2332</a>:
+       <span class="emphasis"><em>Unnecessary copying when inserting into maps with braced-init syntax</em></span>
+    </span></dt><dd><p>Add overloads of <code class="code">insert</code> taking <code class="code">value_type&amp;&amp;</code> rvalues.
     </p></dd><dt><a id="manual.bugs.dr2399"></a><span class="term"><a class="link" href="http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-defects.html#2399" target="_top">2399</a>:
 	<span class="emphasis"><em><code class="code">shared_ptr</code>'s constructor from <code class="code">unique_ptr</code> should be constrained</em></span>
     </span></dt><dd><p>Constrain the constructor to require convertibility.
@@ -520,4 +534,18 @@
          <code class="code">weak_ptr::owner_before</code>
        </em></span>
     </span></dt><dd><p>Add noexcept.
+    </p></dd><dt><a id="manual.bugs.dr2993"></a><span class="term"><a class="link" href="http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-defects.html#2993" target="_top">2993</a>:
+       <span class="emphasis"><em><code class="code">reference_wrapper&lt;T&gt;</code> conversion from <code class="code">T&amp;&amp;</code>
+       </em></span>
+    </span></dt><dd><p>Replaced the constructors with a constrained template,
+      to prevent participation in overload resolution when not valid.
+    </p></dd><dt><a id="manual.bugs.dr3074"></a><span class="term"><a class="link" href="http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-defects.html#3074" target="_top">3074</a>:
+       <span class="emphasis"><em>Non-member functions for <code class="code">valarray</code> should only deduce from the <code class="code">valarray</code>
+       </em></span>
+    </span></dt><dd><p>Change scalar operands to be non-deduced context, so that
+      they will allow conversions from other types to the value_type.
+    </p></dd><dt><a id="manual.bugs.dr3076"></a><span class="term"><a class="link" href="http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-defects.html#3076" target="_top">3076</a>:
+       <span class="emphasis"><em><code class="code">basic_string</code> CTAD ambiguity
+       </em></span>
+    </span></dt><dd><p>Change constructors to constrained templates.
     </p></dd></dl></div></div></div><div class="navfooter"><hr /><table width="100%" summary="Navigation footer"><tr><td width="40%" align="left"><a accesskey="p" href="license.html">Prev</a> </td><td width="20%" align="center"><a accesskey="u" href="status.html">Up</a></td><td width="40%" align="right"> <a accesskey="n" href="setup.html">Next</a></td></tr><tr><td width="40%" align="left" valign="top">License </td><td width="20%" align="center"><a accesskey="h" href="../index.html">Home</a></td><td width="40%" align="right" valign="top"> Chapter 2. Setup</td></tr></table></div></body></html>

@@ -1,5 +1,5 @@
 /* Subroutines used for MIPS code generation.
-   Copyright (C) 1989-2017 Free Software Foundation, Inc.
+   Copyright (C) 1989-2018 Free Software Foundation, Inc.
    Contributed by A. Lichnewsky, lich@inria.inria.fr.
    Changes by Michael Meissner, meissner@osf.org.
    64-bit r4000 support by Ian Lance Taylor, ian@cygnus.com, and
@@ -20,6 +20,8 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with GCC; see the file COPYING3.  If not see
 <http://www.gnu.org/licenses/>.  */
+
+#define IN_TARGET_CODE 1
 
 #include "config.h"
 #include "system.h"
@@ -194,6 +196,16 @@ enum mips_address_type {
   ADDRESS_LO_SUM,
   ADDRESS_CONST_INT,
   ADDRESS_SYMBOLIC
+};
+
+/* Classifies an unconditional branch of interest for the P6600.  */
+
+enum mips_ucbranch_type
+{
+  /* May not even be a branch.  */
+  UC_UNDEFINED,
+  UC_BALC,
+  UC_OTHER
 };
 
 /* Macros to create an enumeration identifier for a function prototype.  */
@@ -489,9 +501,9 @@ unsigned int mips_base_compression_flags;
 static int mips_base_schedule_insns; /* flag_schedule_insns */
 static int mips_base_reorder_blocks_and_partition; /* flag_reorder... */
 static int mips_base_move_loop_invariants; /* flag_move_loop_invariants */
-static int mips_base_align_loops; /* align_loops */
-static int mips_base_align_jumps; /* align_jumps */
-static int mips_base_align_functions; /* align_functions */
+static const char *mips_base_align_loops; /* align_loops */
+static const char *mips_base_align_jumps; /* align_jumps */
+static const char *mips_base_align_functions; /* align_functions */
 
 /* Index [M][R] is true if register R is allowed to hold a value of mode M.  */
 static bool mips_hard_regno_mode_ok_p[MAX_MACHINE_MODE][FIRST_PSEUDO_REGISTER];
@@ -595,29 +607,29 @@ static tree mips_handle_use_shadow_register_set_attr (tree *, tree, tree, int,
 
 /* The value of TARGET_ATTRIBUTE_TABLE.  */
 static const struct attribute_spec mips_attribute_table[] = {
-  /* { name, min_len, max_len, decl_req, type_req, fn_type_req, handler,
-       om_diagnostic } */
-  { "long_call",   0, 0, false, true,  true,  NULL, false },
-  { "short_call",  0, 0, false, true,  true,  NULL, false },
-  { "far",     	   0, 0, false, true,  true,  NULL, false },
-  { "near",        0, 0, false, true,  true,  NULL, false },
+  /* { name, min_len, max_len, decl_req, type_req, fn_type_req,
+       affects_type_identity, handler, exclude } */
+  { "long_call",   0, 0, false, true,  true,  false, NULL, NULL },
+  { "short_call",  0, 0, false, true,  true,  false, NULL, NULL },
+  { "far",     	   0, 0, false, true,  true,  false, NULL, NULL },
+  { "near",        0, 0, false, true,  true,  false, NULL, NULL },
   /* We would really like to treat "mips16" and "nomips16" as type
      attributes, but GCC doesn't provide the hooks we need to support
      the right conversion rules.  As declaration attributes, they affect
      code generation but don't carry other semantics.  */
-  { "mips16", 	   0, 0, true,  false, false, NULL, false },
-  { "nomips16",    0, 0, true,  false, false, NULL, false },
-  { "micromips",   0, 0, true,  false, false, NULL, false },
-  { "nomicromips", 0, 0, true,  false, false, NULL, false },
-  { "nocompression", 0, 0, true,  false, false, NULL, false },
+  { "mips16", 	   0, 0, true,  false, false, false, NULL, NULL },
+  { "nomips16",    0, 0, true,  false, false, false, NULL, NULL },
+  { "micromips",   0, 0, true,  false, false, false, NULL, NULL },
+  { "nomicromips", 0, 0, true,  false, false, false, NULL, NULL },
+  { "nocompression", 0, 0, true,  false, false, false, NULL, NULL },
   /* Allow functions to be specified as interrupt handlers */
-  { "interrupt",   0, 1, false, true,  true, mips_handle_interrupt_attr,
-    false },
-  { "use_shadow_register_set",	0, 1, false, true,  true,
-    mips_handle_use_shadow_register_set_attr, false },
-  { "keep_interrupts_masked",	0, 0, false, true,  true, NULL, false },
-  { "use_debug_exception_return", 0, 0, false, true,  true, NULL, false },
-  { NULL,	   0, 0, false, false, false, NULL, false }
+  { "interrupt",   0, 1, false, true,  true, false, mips_handle_interrupt_attr,
+    NULL },
+  { "use_shadow_register_set",	0, 1, false, true,  true, false,
+    mips_handle_use_shadow_register_set_attr, NULL },
+  { "keep_interrupts_masked",	0, 0, false, true,  true, false, NULL, NULL },
+  { "use_debug_exception_return", 0, 0, false, true, true, false, NULL, NULL },
+  { NULL,	   0, 0, false, false, false, false, NULL, NULL }
 };
 
 /* A table describing all the processors GCC knows about; see
@@ -1125,6 +1137,19 @@ static const struct mips_rtx_cost_data
     COSTS_N_INSNS (36),           /* int_div_di */
 		    2,            /* branch_cost */
 		    4             /* memory_latency */
+  },
+  { /* P6600 */
+    COSTS_N_INSNS (4),            /* fp_add */
+    COSTS_N_INSNS (5),            /* fp_mult_sf */
+    COSTS_N_INSNS (5),            /* fp_mult_df */
+    COSTS_N_INSNS (17),           /* fp_div_sf */
+    COSTS_N_INSNS (17),           /* fp_div_df */
+    COSTS_N_INSNS (5),            /* int_mult_si */
+    COSTS_N_INSNS (5),            /* int_mult_di */
+    COSTS_N_INSNS (8),            /* int_div_si */
+    COSTS_N_INSNS (8),            /* int_div_di */
+		    2,            /* branch_cost */
+		    4             /* memory_latency */
   }
 };
 
@@ -1132,7 +1157,6 @@ static rtx mips_find_pic_call_symbol (rtx_insn *, rtx, bool);
 static int mips_register_move_cost (machine_mode, reg_class_t,
 				    reg_class_t);
 static unsigned int mips_function_arg_boundary (machine_mode, const_tree);
-static machine_mode mips_get_reg_raw_mode (int regno);
 static rtx mips_gen_const_int_vector_shuffle (machine_mode, int);
 
 /* This hash table keeps track of implicit "mips16" and "nomips16" attributes
@@ -6111,7 +6135,7 @@ mips_function_arg_boundary (machine_mode mode, const_tree type)
 
 /* Implement TARGET_GET_RAW_RESULT_MODE and TARGET_GET_RAW_ARG_MODE.  */
 
-static machine_mode
+static fixed_size_mode
 mips_get_reg_raw_mode (int regno)
 {
   if (TARGET_FLOATXX && FP_REG_P (regno))
@@ -10956,7 +10980,7 @@ mips_compute_frame_info (void)
      if we know that none of the called functions will use this space.
 
      But if the target-independent frame size is nonzero, we have already
-     committed to allocating these in STARTING_FRAME_OFFSET for
+     committed to allocating these in TARGET_STARTING_FRAME_OFFSET for
      !FRAME_GROWS_DOWNWARD.  */
 
   if ((size == 0 || FRAME_GROWS_DOWNWARD)
@@ -12080,16 +12104,17 @@ mips_expand_prologue (void)
   if (flag_stack_usage_info)
     current_function_static_stack_size = size;
 
-  if (flag_stack_check == STATIC_BUILTIN_STACK_CHECK)
+  if (flag_stack_check == STATIC_BUILTIN_STACK_CHECK
+      || flag_stack_clash_protection)
     {
       if (crtl->is_leaf && !cfun->calls_alloca)
 	{
-	  if (size > PROBE_INTERVAL && size > STACK_CHECK_PROTECT)
-	    mips_emit_probe_stack_range (STACK_CHECK_PROTECT,
-					 size - STACK_CHECK_PROTECT);
+	  if (size > PROBE_INTERVAL && size > get_stack_check_protect ())
+	    mips_emit_probe_stack_range (get_stack_check_protect (),
+					 size - get_stack_check_protect ());
 	}
       else if (size > 0)
-	mips_emit_probe_stack_range (STACK_CHECK_PROTECT, size);
+	mips_emit_probe_stack_range (get_stack_check_protect (), size);
     }
 
   /* Save the registers.  Allocate up to MIPS_MAX_FIRST_STACK_STEP
@@ -13399,10 +13424,11 @@ mips_preferred_simd_mode (scalar_mode mode)
 
 /* Implement TARGET_VECTORIZE_AUTOVECTORIZE_VECTOR_SIZES.  */
 
-static unsigned int
-mips_autovectorize_vector_sizes (void)
+static void
+mips_autovectorize_vector_sizes (vector_sizes *sizes)
 {
-  return ISA_HAS_MSA ? 16 : 0;
+  if (ISA_HAS_MSA)
+    sizes->safe_push (16);
 }
 
 /* Implement TARGET_INIT_LIBFUNCS.  */
@@ -14589,6 +14615,7 @@ mips_issue_rate (void)
     case PROCESSOR_LOONGSON_2F:
     case PROCESSOR_LOONGSON_3A:
     case PROCESSOR_P5600:
+    case PROCESSOR_P6600:
       return 4;
 
     case PROCESSOR_XLP:
@@ -14724,7 +14751,7 @@ mips_multipass_dfa_lookahead (void)
   if (TUNE_OCTEON)
     return 2;
 
-  if (TUNE_P5600 || TUNE_I6400)
+  if (TUNE_P5600 || TUNE_P6600 || TUNE_I6400)
     return 4;
 
   return 0;
@@ -17611,7 +17638,7 @@ r10k_safe_address_p (rtx x, rtx_insn *insn)
 static bool
 r10k_safe_mem_expr_p (tree expr, unsigned HOST_WIDE_INT offset)
 {
-  HOST_WIDE_INT bitoffset, bitsize;
+  poly_int64 bitoffset, bitsize;
   tree inner, var_offset;
   machine_mode mode;
   int unsigned_p, reverse_p, volatile_p;
@@ -17796,7 +17823,7 @@ r10k_insert_cache_barriers (void)
 		  if (r10k_needs_protection_p (insn))
 		    {
 		      emit_insn_before (gen_r10k_cache_barrier (),
-					unprotected_region);
+					as_a <rtx_insn *> (unprotected_region));
 		      unprotected_region = NULL_RTX;
 		    }
 		}
@@ -18512,7 +18539,7 @@ vr4130_align_insns (void)
 	}
 
       /* See whether INSN is an aligned label.  */
-      if (LABEL_P (insn) && label_to_alignment (insn) >= 3)
+      if (LABEL_P (insn) && label_to_alignment (insn).levels[0].log >= 3)
 	aligned_p = true;
     }
   dfa_finish ();
@@ -18644,6 +18671,29 @@ mips_orphaned_high_part_p (mips_offset_table *htab, rtx_insn *insn)
   return false;
 }
 
+/* Subroutine of mips_avoid_hazard.  We classify unconditional branches
+   of interest for the P6600 for performance reasons.  We're interested
+   in differentiating BALC from JIC, JIALC and BC.  */
+
+static enum mips_ucbranch_type
+mips_classify_branch_p6600 (rtx_insn *insn)
+{
+  /* We ignore sequences here as they represent a filled delay slot.  */
+  if (!insn
+      || !USEFUL_INSN_P (insn)
+      || GET_CODE (PATTERN (insn)) == SEQUENCE)
+    return UC_UNDEFINED;
+
+  if (get_attr_jal (insn) == JAL_INDIRECT /* JIC and JIALC.  */
+      || get_attr_type (insn) == TYPE_JUMP) /* BC.  */
+    return UC_OTHER;
+
+  if (CALL_P (insn) && get_attr_jal (insn) == JAL_DIRECT)
+    return UC_BALC;
+
+  return UC_UNDEFINED;
+}
+
 /* Subroutine of mips_reorg_process_insns.  If there is a hazard between
    INSN and a previous instruction, avoid it by inserting nops after
    instruction AFTER.
@@ -18696,14 +18746,40 @@ mips_avoid_hazard (rtx_insn *after, rtx_insn *insn, int *hilo_delay,
 	   && GET_CODE (pattern) != ASM_INPUT
 	   && asm_noperands (pattern) < 0)
     nops = 1;
+  /* The P6600's branch predictor can handle static sequences of back-to-back
+     branches in the following cases:
+
+     (1) BALC followed by any conditional compact branch
+     (2) BALC followed by BALC
+
+     Any other combinations of compact branches will incur performance
+     penalty.  Inserting a no-op only costs space as the dispatch unit will
+     disregard the nop.  */
+  else if (TUNE_P6600 && TARGET_CB_MAYBE && !optimize_size
+	   && ((mips_classify_branch_p6600 (after) == UC_BALC
+		&& mips_classify_branch_p6600 (insn) == UC_OTHER)
+	       || (mips_classify_branch_p6600 (insn) == UC_BALC
+		   && mips_classify_branch_p6600 (after) == UC_OTHER)))
+    nops = 1;
   else
     nops = 0;
 
   /* Insert the nops between this instruction and the previous one.
      Each new nop takes us further from the last hilo hazard.  */
   *hilo_delay += nops;
+
+  /* Move to the next real instruction if we are inserting a NOP and this
+     instruction is a call with debug information.  The reason being that
+     we can't separate the call from the debug info.   */
+  rtx_insn *real_after = after;
+  if (real_after && nops && CALL_P (real_after))
+    while (real_after
+	   && (NOTE_P (NEXT_INSN (real_after))
+	       || BARRIER_P (NEXT_INSN (real_after))))
+      real_after = NEXT_INSN (real_after);
+
   while (nops-- > 0)
-    emit_insn_after (gen_hazard_nop (), after);
+    emit_insn_after (gen_hazard_nop (), real_after);
 
   /* Set up the state for the next instruction.  */
   *hilo_delay += ninsns;
@@ -18713,6 +18789,15 @@ mips_avoid_hazard (rtx_insn *after, rtx_insn *insn, int *hilo_delay,
     switch (get_attr_hazard (insn))
       {
       case HAZARD_NONE:
+	/* For the P6600, flag some unconditional branches as having a
+	   pseudo-forbidden slot.  This will cause additional nop insertion
+	   or SEQUENCE breaking as required.  This is for performance
+	   reasons not correctness.  */
+	if (TUNE_P6600
+	    && !optimize_size
+	    && TARGET_CB_MAYBE
+	    && mips_classify_branch_p6600 (insn) == UC_OTHER)
+	  *fs_delay = true;
 	break;
 
       case HAZARD_FORBIDDEN_SLOT:
@@ -18952,9 +19037,19 @@ mips_reorg_process_insns (void)
 		     and the next useful instruction is a SEQUENCE of a jump
 		     and a non-nop instruction in the delay slot, remove the
 		     sequence and replace it with the delay slot instruction
-		     then the jump to clear the forbidden slot hazard.  */
+		     then the jump to clear the forbidden slot hazard.
 
-		  if (fs_delay)
+		     For the P6600, this optimisation solves the performance
+		     penalty associated with BALC followed by a delay slot
+		     branch.  We do not set fs_delay as we do not want
+		     the full logic of a forbidden slot; the penalty exists
+		     only against branches not the full class of forbidden
+		     slot instructions.  */
+
+		  if (fs_delay || (TUNE_P6600
+				   && TARGET_CB_MAYBE
+				   && mips_classify_branch_p6600 (insn)
+				      == UC_BALC))
 		    {
 		      /* Search onwards from the current position looking for
 			 a SEQUENCE.  We are looking for pipeline hazards here
@@ -19422,9 +19517,9 @@ mips_set_compression_mode (unsigned int compression_mode)
   flag_schedule_insns = mips_base_schedule_insns;
   flag_reorder_blocks_and_partition = mips_base_reorder_blocks_and_partition;
   flag_move_loop_invariants = mips_base_move_loop_invariants;
-  align_loops = mips_base_align_loops;
-  align_jumps = mips_base_align_jumps;
-  align_functions = mips_base_align_functions;
+  str_align_loops = mips_base_align_loops;
+  str_align_jumps = mips_base_align_jumps;
+  str_align_functions = mips_base_align_functions;
   target_flags &= ~(MASK_MIPS16 | MASK_MICROMIPS);
   target_flags |= compression_mode;
 
@@ -19494,12 +19589,12 @@ mips_set_compression_mode (unsigned int compression_mode)
       /* Provide default values for align_* for 64-bit targets.  */
       if (TARGET_64BIT)
 	{
-	  if (align_loops == 0)
-	    align_loops = 8;
-	  if (align_jumps == 0)
-	    align_jumps = 8;
-	  if (align_functions == 0)
-	    align_functions = 8;
+	  if (flag_align_loops && !str_align_loops)
+	    str_align_loops = "8";
+	  if (flag_align_jumps && !str_align_jumps)
+	    str_align_jumps = "8";
+	  if (flag_align_functions && !str_align_functions)
+	    str_align_functions = "8";
 	}
 
       targetm.min_anchor_offset = -32768;
@@ -20183,9 +20278,9 @@ mips_option_override (void)
   mips_base_schedule_insns = flag_schedule_insns;
   mips_base_reorder_blocks_and_partition = flag_reorder_blocks_and_partition;
   mips_base_move_loop_invariants = flag_move_loop_invariants;
-  mips_base_align_loops = align_loops;
-  mips_base_align_jumps = align_jumps;
-  mips_base_align_functions = align_functions;
+  mips_base_align_loops = str_align_loops;
+  mips_base_align_jumps = str_align_jumps;
+  mips_base_align_functions = str_align_functions;
 
   /* Now select the ISA mode.
 
@@ -20423,7 +20518,7 @@ mips_final_prescan_insn (rtx_insn *insn, rtx *opvec, int noperands)
       && GET_CODE (PATTERN (insn)) == UNSPEC_VOLATILE
       && XINT (PATTERN (insn), 1) == UNSPEC_CONSTTABLE)
     mips_set_text_contents_type (asm_out_file, "__pool_",
-				 XINT (XVECEXP (PATTERN (insn), 0, 0), 0),
+				 INTVAL (XVECEXP (PATTERN (insn), 0, 0)),
 				 FALSE);
 
   if (mips_need_noat_wrapper_p (insn, opvec, noperands))
@@ -20447,7 +20542,7 @@ mips_final_postscan_insn (FILE *file ATTRIBUTE_UNUSED, rtx_insn *insn,
       && GET_CODE (PATTERN (insn)) == UNSPEC_VOLATILE
       && XINT (PATTERN (insn), 1) == UNSPEC_CONSTTABLE_END)
     mips_set_text_contents_type (asm_out_file, "__pend_",
-				 XINT (XVECEXP (PATTERN (insn), 0, 0), 0),
+				 INTVAL (XVECEXP (PATTERN (insn), 0, 0)),
 				 TRUE);
 }
 
@@ -21377,34 +21472,32 @@ mips_expand_vec_perm_const_1 (struct expand_vec_perm_d *d)
   return false;
 }
 
-/* Expand a vec_perm_const pattern.  */
+/* Implement TARGET_VECTORIZE_VEC_PERM_CONST.  */
 
-bool
-mips_expand_vec_perm_const (rtx operands[4])
+static bool
+mips_vectorize_vec_perm_const (machine_mode vmode, rtx target, rtx op0,
+			       rtx op1, const vec_perm_indices &sel)
 {
   struct expand_vec_perm_d d;
   int i, nelt, which;
   unsigned char orig_perm[MAX_VECT_LEN];
-  rtx sel;
   bool ok;
 
-  d.target = operands[0];
-  d.op0 = operands[1];
-  d.op1 = operands[2];
-  sel = operands[3];
+  d.target = target;
+  d.op0 = op0;
+  d.op1 = op1;
 
-  d.vmode = GET_MODE (d.target);
-  gcc_assert (VECTOR_MODE_P (d.vmode));
-  d.nelt = nelt = GET_MODE_NUNITS (d.vmode);
-  d.testing_p = false;
+  d.vmode = vmode;
+  gcc_assert (VECTOR_MODE_P (vmode));
+  d.nelt = nelt = GET_MODE_NUNITS (vmode);
+  d.testing_p = !target;
 
   /* This is overly conservative, but ensures we don't get an
      uninitialized warning on ORIG_PERM.  */
   memset (orig_perm, 0, MAX_VECT_LEN);
   for (i = which = 0; i < nelt; ++i)
     {
-      rtx e = XVECEXP (sel, 0, i);
-      int ei = INTVAL (e) & (2 * nelt - 1);
+      int ei = sel[i] & (2 * nelt - 1);
       which |= (ei < nelt ? 1 : 2);
       orig_perm[i] = ei;
     }
@@ -21417,7 +21510,7 @@ mips_expand_vec_perm_const (rtx operands[4])
 
     case 3:
       d.one_vector_p = false;
-      if (!rtx_equal_p (d.op0, d.op1))
+      if (d.testing_p || !rtx_equal_p (d.op0, d.op1))
 	break;
       /* FALLTHRU */
 
@@ -21434,6 +21527,19 @@ mips_expand_vec_perm_const (rtx operands[4])
       break;
     }
 
+  if (d.testing_p)
+    {
+      d.target = gen_raw_REG (d.vmode, LAST_VIRTUAL_REGISTER + 1);
+      d.op1 = d.op0 = gen_raw_REG (d.vmode, LAST_VIRTUAL_REGISTER + 2);
+      if (!d.one_vector_p)
+	d.op1 = gen_raw_REG (d.vmode, LAST_VIRTUAL_REGISTER + 3);
+
+      start_sequence ();
+      ok = mips_expand_vec_perm_const_1 (&d);
+      end_sequence ();
+      return ok;
+    }
+
   ok = mips_expand_vec_perm_const_1 (&d);
 
   /* If we were given a two-vector permutation which just happened to
@@ -21445,8 +21551,8 @@ mips_expand_vec_perm_const (rtx operands[4])
      the original permutation.  */
   if (!ok && which == 3)
     {
-      d.op0 = operands[1];
-      d.op1 = operands[2];
+      d.op0 = op0;
+      d.op1 = op1;
       d.one_vector_p = false;
       memcpy (d.perm, orig_perm, MAX_VECT_LEN);
       ok = mips_expand_vec_perm_const_1 (&d);
@@ -21464,49 +21570,6 @@ mips_sched_reassociation_width (unsigned int opc ATTRIBUTE_UNUSED,
   if (MSA_SUPPORTED_MODE_P (mode))
     return 2;
   return 1;
-}
-
-/* Implement TARGET_VECTORIZE_VEC_PERM_CONST_OK.  */
-
-static bool
-mips_vectorize_vec_perm_const_ok (machine_mode vmode,
-				  const unsigned char *sel)
-{
-  struct expand_vec_perm_d d;
-  unsigned int i, nelt, which;
-  bool ret;
-
-  d.vmode = vmode;
-  d.nelt = nelt = GET_MODE_NUNITS (d.vmode);
-  d.testing_p = true;
-  memcpy (d.perm, sel, nelt);
-
-  /* Categorize the set of elements in the selector.  */
-  for (i = which = 0; i < nelt; ++i)
-    {
-      unsigned char e = d.perm[i];
-      gcc_assert (e < 2 * nelt);
-      which |= (e < nelt ? 1 : 2);
-    }
-
-  /* For all elements from second vector, fold the elements to first.  */
-  if (which == 2)
-    for (i = 0; i < nelt; ++i)
-      d.perm[i] -= nelt;
-
-  /* Check whether the mask can be applied to the vector type.  */
-  d.one_vector_p = (which != 3);
-
-  d.target = gen_raw_REG (d.vmode, LAST_VIRTUAL_REGISTER + 1);
-  d.op1 = d.op0 = gen_raw_REG (d.vmode, LAST_VIRTUAL_REGISTER + 2);
-  if (!d.one_vector_p)
-    d.op1 = gen_raw_REG (d.vmode, LAST_VIRTUAL_REGISTER + 3);
-
-  start_sequence ();
-  ret = mips_expand_vec_perm_const_1 (&d);
-  end_sequence ();
-
-  return ret;
 }
 
 /* Expand an integral vector unpack operation.  */
@@ -21681,14 +21744,8 @@ mips_expand_vi_broadcast (machine_mode vmode, rtx target, rtx elt)
 rtx
 mips_gen_const_int_vector (machine_mode mode, HOST_WIDE_INT val)
 {
-  int nunits = GET_MODE_NUNITS (mode);
-  rtvec v = rtvec_alloc (nunits);
-  int i;
-
-  for (i = 0; i < nunits; i++)
-    RTVEC_ELT (v, i) = gen_int_mode (val, GET_MODE_INNER (mode));
-
-  return gen_rtx_CONST_VECTOR (mode, v);
+  rtx c = gen_int_mode (val, GET_MODE_INNER (mode));
+  return gen_const_vec_duplicate (mode, c);
 }
 
 /* Return a vector of repeated 4-element sets generated from
@@ -21843,12 +21900,7 @@ mips_expand_vector_init (rtx target, rtx vals)
 	}
       else
 	{
-	  rtvec vec = shallow_copy_rtvec (XVEC (vals, 0));
-
-	  for (i = 0; i < nelt; ++i)
-	    RTVEC_ELT (vec, i) = CONST0_RTX (imode);
-
-	  emit_move_insn (target, gen_rtx_CONST_VECTOR (vmode, vec));
+	  emit_move_insn (target, CONST0_RTX (vmode));
 
 	  for (i = 0; i < nelt; ++i)
 	    {
@@ -22332,9 +22384,38 @@ mips_promote_function_mode (const_tree type ATTRIBUTE_UNUSED,
 /* Implement TARGET_TRULY_NOOP_TRUNCATION.  */
 
 static bool
-mips_truly_noop_truncation (unsigned int outprec, unsigned int inprec)
+mips_truly_noop_truncation (poly_uint64 outprec, poly_uint64 inprec)
 {
   return !TARGET_64BIT || inprec <= 32 || outprec > 32;
+}
+
+/* Implement TARGET_CONSTANT_ALIGNMENT.  */
+
+static HOST_WIDE_INT
+mips_constant_alignment (const_tree exp, HOST_WIDE_INT align)
+{
+  if (TREE_CODE (exp) == STRING_CST || TREE_CODE (exp) == CONSTRUCTOR)
+    return MAX (align, BITS_PER_WORD);
+  return align;
+}
+
+/* Implement the TARGET_ASAN_SHADOW_OFFSET hook.  */
+
+static unsigned HOST_WIDE_INT
+mips_asan_shadow_offset (void)
+{
+  return 0x0aaa0000;
+}
+
+/* Implement TARGET_STARTING_FRAME_OFFSET.  See mips_compute_frame_info
+   for details about the frame layout.  */
+
+static HOST_WIDE_INT
+mips_starting_frame_offset (void)
+{
+  if (FRAME_GROWS_DOWNWARD)
+    return 0;
+  return crtl->outgoing_args_size + MIPS_GP_SAVE_AREA_SIZE;
 }
 
 /* Initialize the GCC target structure.  */
@@ -22580,8 +22661,8 @@ mips_truly_noop_truncation (unsigned int outprec, unsigned int inprec)
 #undef TARGET_PREPARE_PCH_SAVE
 #define TARGET_PREPARE_PCH_SAVE mips_prepare_pch_save
 
-#undef TARGET_VECTORIZE_VEC_PERM_CONST_OK
-#define TARGET_VECTORIZE_VEC_PERM_CONST_OK mips_vectorize_vec_perm_const_ok
+#undef TARGET_VECTORIZE_VEC_PERM_CONST
+#define TARGET_VECTORIZE_VEC_PERM_CONST mips_vectorize_vec_perm_const
 
 #undef TARGET_SCHED_REASSOCIATION_WIDTH
 #define TARGET_SCHED_REASSOCIATION_WIDTH mips_sched_reassociation_width
@@ -22633,6 +22714,15 @@ mips_truly_noop_truncation (unsigned int outprec, unsigned int inprec)
 
 #undef TARGET_TRULY_NOOP_TRUNCATION
 #define TARGET_TRULY_NOOP_TRUNCATION mips_truly_noop_truncation
+
+#undef TARGET_CONSTANT_ALIGNMENT
+#define TARGET_CONSTANT_ALIGNMENT mips_constant_alignment
+
+#undef TARGET_ASAN_SHADOW_OFFSET
+#define TARGET_ASAN_SHADOW_OFFSET mips_asan_shadow_offset
+
+#undef TARGET_STARTING_FRAME_OFFSET
+#define TARGET_STARTING_FRAME_OFFSET mips_starting_frame_offset
 
 struct gcc_target targetm = TARGET_INITIALIZER;
 

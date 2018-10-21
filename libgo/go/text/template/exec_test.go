@@ -44,6 +44,12 @@ type T struct {
 	MSIEmpty map[string]int
 	MXI      map[interface{}]int
 	MII      map[int]int
+	MI32S    map[int32]string
+	MI64S    map[int64]string
+	MUI32S   map[uint32]string
+	MUI64S   map[uint64]string
+	MI8S     map[int8]string
+	MUI8S    map[uint8]string
 	SMSI     []map[string]int
 	// Empty interfaces; used to see if we can dig inside one.
 	Empty0 interface{} // nil
@@ -124,6 +130,12 @@ var tVal = &T{
 	MSIone: map[string]int{"one": 1},
 	MXI:    map[interface{}]int{"one": 1},
 	MII:    map[int]int{1: 1},
+	MI32S:  map[int32]string{1: "one", 2: "two"},
+	MI64S:  map[int64]string{2: "i642", 3: "i643"},
+	MUI32S: map[uint32]string{2: "u322", 3: "u323"},
+	MUI64S: map[uint64]string{2: "ui642", 3: "ui643"},
+	MI8S:   map[int8]string{2: "i82", 3: "i83"},
+	MUI8S:  map[uint8]string{2: "u82", 3: "u83"},
 	SMSI: []map[string]int{
 		{"one": 1, "two": 2},
 		{"eleven": 11, "twelve": 12},
@@ -292,6 +304,13 @@ var execTests = []execTest{
 	{"$.I", "{{$.I}}", "17", tVal, true},
 	{"$.U.V", "{{$.U.V}}", "v", tVal, true},
 	{"declare in action", "{{$x := $.U.V}}{{$x}}", "v", tVal, true},
+	{"simple assignment", "{{$x := 2}}{{$x = 3}}{{$x}}", "3", tVal, true},
+	{"nested assignment",
+		"{{$x := 2}}{{if true}}{{$x = 3}}{{end}}{{$x}}",
+		"3", tVal, true},
+	{"nested assignment changes the last declaration",
+		"{{$x := 1}}{{if true}}{{$x := 2}}{{if true}}{{$x = 3}}{{end}}{{end}}{{$x}}",
+		"1", tVal, true},
 
 	// Type with String method.
 	{"V{6666}.String()", "-{{.V0}}-", "-<6666>-", tVal, true},
@@ -317,6 +336,10 @@ var execTests = []execTest{
 	{"empty with slice", "{{.Empty3}}", "[7 8]", tVal, true},
 	{"empty with struct", "{{.Empty4}}", "{UinEmpty}", tVal, true},
 	{"empty with struct, field", "{{.Empty4.V}}", "UinEmpty", tVal, true},
+
+	// Edge cases with <no value> with an interface value
+	{"field on interface", "{{.foo}}", "<no value>", nil, true},
+	{"field on parenthesized interface", "{{(.).foo}}", "<no value>", nil, true},
 
 	// Method calls.
 	{".Method0", "-{{.Method0}}-", "-M0-", tVal, true},
@@ -365,6 +388,11 @@ var execTests = []execTest{
 	// Pipelines.
 	{"pipeline", "-{{.Method0 | .Method2 .U16}}-", "-Method2: 16 M0-", tVal, true},
 	{"pipeline func", "-{{call .VariadicFunc `llo` | call .VariadicFunc `he` }}-", "-<he+<llo>>-", tVal, true},
+
+	// Nil values aren't missing arguments.
+	{"nil pipeline", "{{ .Empty0 | call .NilOKFunc }}", "true", tVal, true},
+	{"nil call arg", "{{ call .NilOKFunc .Empty0 }}", "true", tVal, true},
+	{"bad nil pipeline", "{{ .Empty0 | .VariadicFunc }}", "", tVal, false},
 
 	// Parenthesized expressions
 	{"parens in pipeline", "{{printf `%d %d %d` (1) (2 | add 3) (add 4 (add 5 6))}}", "1 5 15", tVal, true},
@@ -420,6 +448,8 @@ var execTests = []execTest{
 	{"html pipeline", `{{printf "<script>alert(\"XSS\");</script>" | html}}`,
 		"&lt;script&gt;alert(&#34;XSS&#34;);&lt;/script&gt;", nil, true},
 	{"html", `{{html .PS}}`, "a string", tVal, true},
+	{"html typed nil", `{{html .NIL}}`, "&lt;nil&gt;", tVal, true},
+	{"html untyped nil", `{{html .Empty0}}`, "&lt;no value&gt;", tVal, true},
 
 	// JavaScript.
 	{"js", `{{js .}}`, `It\'d be nice.`, `It'd be nice.`, true},
@@ -448,6 +478,11 @@ var execTests = []execTest{
 	{"map[WRONG]", "{{index .MSI 10}}", "", tVal, false},
 	{"double index", "{{index .SMSI 1 `eleven`}}", "11", tVal, true},
 	{"nil[1]", "{{index nil 1}}", "", tVal, false},
+	{"map MI64S", "{{index .MI64S 2}}", "i642", tVal, true},
+	{"map MI32S", "{{index .MI32S 2}}", "two", tVal, true},
+	{"map MUI64S", "{{index .MUI64S 3}}", "ui643", tVal, true},
+	{"map MI8S", "{{index .MI8S 3}}", "i83", tVal, true},
+	{"map MUI8S", "{{index .MUI8S 2}}", "u82", tVal, true},
 
 	// Len.
 	{"slice", "{{len .SI}}", "3", tVal, true},

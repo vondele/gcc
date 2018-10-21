@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 S p e c                                  --
 --                                                                          --
---          Copyright (C) 1992-2017, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2018, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -52,7 +52,9 @@ package Exp_Util is
 
    --    For an expression occurring in a declaration (declarations always
    --    appear in lists), the actions are similarly inserted into the list
-   --    just before the associated declaration.
+   --    just before the associated declaration. ???Declarations do not always
+   --    appear in lists; in particular, a library unit declaration does not
+   --    appear in a list, and Insert_Action will crash in that case.
 
    --  The following special cases arise:
 
@@ -503,6 +505,10 @@ package Exp_Util is
    --  elaborated before the original expression Exp, so that there is no need
    --  to repeat the checks.
 
+   function Enclosing_Init_Proc return Entity_Id;
+   --  Obtain the entity of the type initialization procedure which encloses
+   --  the current scope. Return Empty if no such procedure exists.
+
    procedure Ensure_Defined (Typ : Entity_Id; N : Node_Id);
    --  This procedure ensures that type referenced by Typ is defined. For the
    --  case of a type other than an Itype, nothing needs to be done, since
@@ -579,8 +585,9 @@ package Exp_Util is
    function Find_Interface_Tag
      (T     : Entity_Id;
       Iface : Entity_Id) return Entity_Id;
-   --  Ada 2005 (AI-251): Given a type T implementing the interface Iface,
-   --  return the record component containing the tag of Iface.
+   --  Ada 2005 (AI-251): Given a type T and an interface Iface, return the
+   --  record component containing the tag of Iface if T implements Iface or
+   --  Empty if it does not.
 
    function Find_Prim_Op (T : Entity_Id; Name : Name_Id) return Entity_Id;
    --  Find the first primitive operation of a tagged type T with name Name.
@@ -856,11 +863,8 @@ package Exp_Util is
    --  False means that it is not known if the value is positive or negative.
 
    function Make_Invariant_Call (Expr : Node_Id) return Node_Id;
-   --  Expr is an object of a type which Has_Invariants set (and which thus
-   --  also has an Invariant_Procedure set). If invariants are enabled, this
-   --  function returns a call to the Invariant procedure passing Expr as the
-   --  argument, and returns it unanalyzed. If invariants are not enabled,
-   --  returns a null statement.
+   --  Generate a call to the Invariant_Procedure associated with the type of
+   --  expression Expr. Expr is passed as an actual parameter in the call.
 
    function Make_Predicate_Call
      (Typ  : Entity_Id;
@@ -916,6 +920,11 @@ package Exp_Util is
    --  temporaries that interfere with stack checking mechanism. Note that the
    --  caller has to check whether stack checking is actually enabled in order
    --  to guide the expansion (typically of a function call).
+
+   function Needs_Conditional_Null_Excluding_Check
+     (Typ : Entity_Id) return Boolean;
+   --  Check if a type meets certain properties that require it to have a
+   --  conditional null-excluding check within its Init_Proc.
 
    function Needs_Constant_Address
      (Decl : Node_Id;

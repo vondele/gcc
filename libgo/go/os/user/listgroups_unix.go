@@ -3,6 +3,7 @@
 // license that can be found in the LICENSE file.
 
 // +build dragonfly darwin freebsd !android,linux netbsd openbsd
+// +build cgo,!osusergo
 
 package user
 
@@ -15,8 +16,9 @@ import (
 /*
 #include <unistd.h>
 #include <sys/types.h>
-#include <stdlib.h>
 */
+
+const maxGroups = 2048
 
 func listGroups(u *User) ([]string, error) {
 	ug, err := strconv.Atoi(u.Gid)

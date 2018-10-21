@@ -1,5 +1,5 @@
 /* Target definitions for GNU compiler for PowerPC running System V.4
-   Copyright (C) 1995-2017 Free Software Foundation, Inc.
+   Copyright (C) 1995-2018 Free Software Foundation, Inc.
    Contributed by Cygnus Support.
 
    This file is part of GCC.
@@ -22,10 +22,6 @@
    a copy of the GCC Runtime Library Exception along with this program;
    see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
    <http://www.gnu.org/licenses/>.  */
-
-/* Header files should be C++ aware in general.  */
-#undef  NO_IMPLICIT_EXTERN_C
-#define NO_IMPLICIT_EXTERN_C
 
 /* Yes!  We are ELF.  */
 #define	TARGET_OBJECT_FORMAT OBJECT_ELF
@@ -160,7 +156,7 @@ do {									\
     {									\
       rs6000_sdata = SDATA_NONE;					\
       error ("%<%s=%s%> and %<%s-%s%> are incompatible",		\
-	     "-msdata", "-mcall", rs6000_sdata_name, rs6000_abi_name);	\
+	     "-msdata", rs6000_sdata_name, "-mcall", rs6000_abi_name);	\
     }									\
 									\
   targetm.have_srodata_section = rs6000_sdata == SDATA_EABI;		\
@@ -607,9 +603,6 @@ ENDIAN_SELECT(" -mbig", " -mlittle", DEFAULT_ASM_ENDIAN)
                : %(link_os_default)     }"
 
 #define LINK_OS_DEFAULT_SPEC ""
-
-#define DRIVER_SELF_SPECS "%{mfpu=none: %<mfpu=* \
- 	%<msingle-float %<mdouble-float}"
 
 /* Override rs6000.h definition.  */
 #undef	CPP_SPEC

@@ -1,5 +1,5 @@
 /* A type-safe hash table template.
-   Copyright (C) 2012-2017 Free Software Foundation, Inc.
+   Copyright (C) 2012-2018 Free Software Foundation, Inc.
    Contributed by Lawrence Crowl <crowl@google.com>
 
 This file is part of GCC.
@@ -561,7 +561,7 @@ private:
 #include "mem-stats.h"
 #include "hash-map.h"
 
-extern mem_alloc_description<mem_usage> hash_table_usage;
+extern mem_alloc_description<mem_usage>& hash_table_usage (void);
 
 /* Support function for statistics.  */
 extern void dump_hash_table_loc_statistics (void);
@@ -580,7 +580,7 @@ hash_table<Descriptor, Allocator>::hash_table (size_t size, bool ggc, bool
   size = prime_tab[size_prime_index].prime;
 
   if (m_gather_mem_stats)
-    hash_table_usage.register_descriptor (this, origin, ggc
+    hash_table_usage ().register_descriptor (this, origin, ggc
 					  FINAL_PASS_MEM_STAT);
 
   m_entries = alloc_entries (size PASS_MEM_STAT);
@@ -600,7 +600,7 @@ hash_table<Descriptor, Allocator>::hash_table (const hash_table &h, bool ggc,
   size_t size = h.m_size;
 
   if (m_gather_mem_stats)
-    hash_table_usage.register_descriptor (this, origin, ggc
+    hash_table_usage ().register_descriptor (this, origin, ggc
 					  FINAL_PASS_MEM_STAT);
 
   value_type *nentries = alloc_entries (size PASS_MEM_STAT);
@@ -630,7 +630,7 @@ hash_table<Descriptor, Allocator>::~hash_table ()
     ggc_free (m_entries);
 
   if (m_gather_mem_stats)
-    hash_table_usage.release_instance_overhead (this,
+    hash_table_usage ().release_instance_overhead (this,
 						sizeof (value_type) * m_size,
 						true);
 }
@@ -644,7 +644,7 @@ hash_table<Descriptor, Allocator>::alloc_entries (size_t n MEM_STAT_DECL) const
   value_type *nentries;
 
   if (m_gather_mem_stats)
-    hash_table_usage.register_instance_overhead (sizeof (value_type) * n, this);
+    hash_table_usage ().register_instance_overhead (sizeof (value_type) * n, this);
 
   if (!m_ggc)
     nentries = Allocator <value_type> ::data_alloc (n);
@@ -736,7 +736,7 @@ hash_table<Descriptor, Allocator>::expand ()
   value_type *nentries = alloc_entries (nsize);
 
   if (m_gather_mem_stats)
-    hash_table_usage.release_instance_overhead (this, sizeof (value_type)
+    hash_table_usage ().release_instance_overhead (this, sizeof (value_type)
 						    * osize);
 
   m_entries = nentries;
@@ -804,8 +804,12 @@ hash_table<Descriptor, Allocator>::empty_slow ()
     }
   else
     {
+#ifndef BROKEN_VALUE_INITIALIZATION
       for ( ; size; ++entries, --size)
 	*entries = value_type ();
+#else
+      memset (entries, 0, size * sizeof (value_type));
+#endif
     }
   m_n_deleted = 0;
   m_n_elements = 0;
@@ -1044,7 +1048,9 @@ gt_ggc_mx (hash_table<E> *h)
 	  || table::is_deleted (h->m_entries[i]))
 	continue;
 
-      E::ggc_mx (h->m_entries[i]);
+      /* Use ggc_maxbe_mx so we don't mark right away for cache tables; we'll
+	 mark in gt_cleare_cache if appropriate.  */
+      E::ggc_maybe_mx (h->m_entries[i]);
     }
 }
 
@@ -1094,7 +1100,6 @@ template<typename H>
 inline void
 gt_cleare_cache (hash_table<H> *h)
 {
-  extern void gt_ggc_mx (typename H::value_type &t);
   typedef hash_table<H> table;
   if (!h)
     return;
@@ -1106,7 +1111,7 @@ gt_cleare_cache (hash_table<H> *h)
 	if (res == 0)
 	  h->clear_slot (&*iter);
 	else if (res != -1)
-	  gt_ggc_mx (*iter);
+	  H::ggc_mx (*iter);
       }
 }
 

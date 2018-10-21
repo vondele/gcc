@@ -1,5 +1,5 @@
 ;; Machine description for PowerPC synchronization instructions.
-;; Copyright (C) 2005-2017 Free Software Foundation, Inc.
+;; Copyright (C) 2005-2018 Free Software Foundation, Inc.
 ;; Contributed by Geoffrey Keating.
 
 ;; This file is part of GCC.
@@ -91,13 +91,10 @@
 	(unspec:BLK [(match_dup 0)] UNSPEC_LWSYNC))]
   ""
 {
-  /* Some AIX assemblers don't accept lwsync, so we use a .long.  */
   if (TARGET_NO_LWSYNC)
     return "sync";
-  else if (TARGET_LWSYNC_INSTRUCTION)
-    return "lwsync";
   else
-    return ".long 0x7c2004ac";
+    return "lwsync";
 }
   [(set_attr "type" "sync")])
 

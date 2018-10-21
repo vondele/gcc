@@ -1,5 +1,5 @@
 # Manipulate the CPU, FPU and architecture descriptions for ARM.
-# Copyright (C) 2017 Free Software Foundation, Inc.
+# Copyright (C) 2017-2018 Free Software Foundation, Inc.
 #
 # This file is part of GCC.
 #
@@ -21,7 +21,9 @@
 # where <cmd> is one of:
 #	data: Print the standard 'C' data tables for the CPUs
 #	common-data: Print the 'C' data for shared driver/compiler files
+#	native: Print the data structures used by the native driver
 #	headers: Print the standard 'C' headers for the CPUs
+#	isa: Generate the arm-isa.h header
 #	md: Print the machine description fragment
 #	opt: Print the option tables fragment
 #	chkcpu <name>: Checks that <name> is a valid CPU
@@ -31,7 +33,8 @@
 
 function fatal (m) {
     print "error ("lineno"): " m > "/dev/stderr"
-    exit 1
+    fatal_err = 1
+    if (parse_done) exit 1
 }
 
 function toplevel () {
@@ -59,7 +62,7 @@ function boilerplate (style) {
     print cc "Generated automatically by parsecpu.awk from arm-cpus.in."
     print cc "Do not edit."
     print ""
-    print cc "Copyright (C) 2011-2017 Free Software Foundation, Inc."
+    print cc "Copyright (C) 2011-2018 Free Software Foundation, Inc."
     print ""
     print cc "This file is part of GCC."
     print ""
@@ -83,9 +86,44 @@ function tune_flag_pfx (f) {
     return "TF_" f
 }
 
-function isa_pfx (f) {
-    if (f ~ /^(bit|quirk)_.*/) return "isa_" f
-    return "ISA_" f
+# Print out the bits for the features in FLIST, which may be a
+# mixture of fgroup and individual bits.  Print each feature needed
+# exactly once.  Terminate the list with isa_nobit.  Prefix each line by
+# INDENT.  Does not print a new line at the end.
+function print_isa_bits_for (flist, indent) {
+    nbits = split (flist, bits)
+
+    for (bit = 1; bit <= nbits; bit++) {
+	if (bits[bit] in features) {
+	    pbit[bits[bit]] = 1
+	} else if (bits[bit] in fgroup) {
+	    for (gbits in fgrp_bits) {
+		split (gbits, bitsep, SUBSEP)
+		if (bitsep[1] == bits[bit]) {
+		    pbit[bitsep[2]] = 1
+		}
+	    }
+	} else fatal("feature " bits[bit] " not declared")
+    }
+    zbit = ORS
+    ORS = ""
+    print indent "{\n" indent "  "
+    ORS = ", "
+    count = 0
+    for (bname in pbit) {
+	print "isa_bit_" bname
+	count++
+	if (count == 4) {
+	    count = 0
+	    ORS = ""
+	    print "\n" indent "  "
+	    ORS = ", "
+	}
+    }
+    ORS = ""
+    print "isa_nobit\n" indent "}"
+    ORS = zbit
+    delete pbit
 }
 
 function gen_headers () {
@@ -125,6 +163,35 @@ function gen_headers () {
     print "};"
 }
 
+function gen_isa () {
+    boilerplate("C")
+    print "enum isa_feature {"
+    print "  isa_nobit = 0,"
+    for (fbit in features) {
+	print "  isa_bit_" fbit ","
+    }
+    print "  isa_num_bits"
+    print "};\n"
+
+    for (fgrp in fgroup) {
+	print "#define ISA_"fgrp " \\"
+	z = ORS
+	ORS = ""
+	first = 1
+	for (bitcomb in fgrp_bits) {
+	    split (bitcomb, bitsep, SUBSEP)
+	    if (bitsep[1] == fgrp) {
+		if (first) {
+		    first = 0
+		} else print ", \\\n"
+		print "  isa_bit_" bitsep[2]
+	    }
+	}
+	ORS = z
+	print "\n"
+    }
+}
+
 function gen_data () {
     boilerplate("C")
 
@@ -155,7 +222,6 @@ function gen_data () {
     }
     print "  {TARGET_CPU_arm_none, 0, NULL}"
     print "};"
-    
 }
 
 function gen_comm_data () {
@@ -172,8 +238,8 @@ function gen_comm_data () {
 		print "  {"
 		print "    \"" opts[opt] "\", " \
 		    cpu_opt_remove[cpus[n],opts[opt]] ", false,"
-		print "    { " cpu_opt_isa[cpus[n],opts[opt]] ", isa_nobit }"
-		print "  },"
+		print_isa_bits_for(cpu_opt_isa[cpus[n],opts[opt]], "    ")
+		print "\n  },"
 	    }
 	    if (cpus[n] in cpu_optaliases) {
 		naliases = split (cpu_optaliases[cpus[n]], aliases)
@@ -188,8 +254,8 @@ function gen_comm_data () {
 		    print "  {"
 		    print "    \"" aliases[alias] "\", " \
 			cpu_opt_remove[cpus[n],equiv] ", true, "
-		    print "    { " cpu_opt_isa[cpus[n],equiv] ", isa_nobit }"
-		    print "  },"
+		    print_isa_bits_for(cpu_opt_isa[cpus[n],equiv], "    ")
+		    print "\n  },"
 		}
 	    }
 	    print "  { NULL, false, false, {isa_nobit}}"
@@ -214,8 +280,7 @@ function gen_comm_data () {
 	if (! (feats[1] in arch_isa)) {
 	    fatal("unknown arch " feats[1] " for cpu " cpus[n])
 	}
-	print "      {"
-	print "        " arch_isa[feats[1]] ","
+	all_isa_bits = arch_isa[feats[1]]
 	for (m = 2; m <= nfeats; m++) {
 	    if (! ((feats[1], feats[m]) in arch_opt_isa)) {
 		fatal("unknown feature " feats[m] " for architecture " feats[1])
@@ -223,42 +288,13 @@ function gen_comm_data () {
 	    if (arch_opt_remove[feats[1],feats[m]] == "true") {
 		fatal("cannot remove features from architecture specs")
 	    }
-	    # The isa_features array that is being initialized here has a length
-	    # of max isa_bit_num, which is the last entry in the enum.
-	    # Logically this means that the number of features is implicitly
-	    # never more than the number of feature bits we have.  This is only
-	    # true if we don't emit duplicates here.  So keep track of which
-	    # options we have already emitted so we don't emit them twice.
-	    nopts = split (arch_opt_isa[feats[1],feats[m]], opts, ",")
-	    for (i = 1; i <= nopts; i++) {
-		if (! (opts[i] in seen)) {
-		  print "        " opts[i] ","
-		  seen[opts[i]]
-		}
-	    }
-	}
-	if (cpus[n] in cpu_fpu) {
-	    nopts = split (fpu_isa[cpu_fpu[cpus[n]]], opts, ",")
-	    for (i = 1; i <= nopts; i++) {
-		if (! (opts[i] in seen)) {
-		  print "        " opts[i] ","
-		  seen[opts[i]]
-		}
-	    }
+	    all_isa_bits = all_isa_bits " " arch_opt_isa[feats[1],feats[m]]
 	}
 	if (cpus[n] in cpu_isa) {
-	    nopts = split (cpu_isa[cpus[n]], opts, ",")
-	    for (i = 1; i <= nopts; i++) {
-		if (! (opts[i] in seen)) {
-		  print "        " opts[i] ","
-		  seen[opts[i]]
-		}
-	    }
+	    all_isa_bits = all_isa_bits " " cpu_isa[cpus[n]]
 	}
-	delete seen
-	print "        isa_nobit"
-	print "      }"
-	print "    },"
+	print_isa_bits_for(all_isa_bits, "      ")
+	print "\n    },"
 	# arch
 	print "    TARGET_ARCH_" arch_cnames[feats[1]]
 	print "  },"
@@ -278,8 +314,8 @@ function gen_comm_data () {
 		print "  {"
 		print "    \"" opts[opt] "\", " \
 		    arch_opt_remove[archs[n],opts[opt]] ", false,"
-		print "    { " arch_opt_isa[archs[n],opts[opt]] ", isa_nobit }"
-		print "  },"
+		print_isa_bits_for(arch_opt_isa[archs[n],opts[opt]], "    ")
+		print "\n  },"
 	    }
 	    if (archs[n] in arch_optaliases) {
 		naliases = split (arch_optaliases[archs[n]], aliases)
@@ -294,8 +330,8 @@ function gen_comm_data () {
 		    print "  {"
 		    print "    \"" aliases[alias] "\", " \
 			arch_opt_remove[archs[n],equiv] ", true, "
-		    print "    { " arch_opt_isa[archs[n],equiv] ", isa_nobit }"
-		    print "  },"
+		    print_isa_bits_for(arch_opt_isa[archs[n],equiv], "    ")
+		    print "\n  },"
 		}
 	    }
 	    print "  { NULL, false, false, {isa_nobit}}"
@@ -321,10 +357,8 @@ function gen_comm_data () {
 	    print "    arch_opttab_" arch_cnames[archs[n]] ","
 	} else print "    NULL,"
 	# common.isa_bits
-	print "    {"
-	print "      " arch_isa[archs[n]] ","
-	print "      isa_nobit"
-	print "    },"
+	print_isa_bits_for(arch_isa[archs[n]], "    ")
+	print ","
 	# arch, base_arch
 	print "    \"" arch_base[archs[n]] "\", BASE_ARCH_" \
 	    arch_base[archs[n]] ","
@@ -351,13 +385,35 @@ function gen_comm_data () {
     for (n = 1; n <= nfpus; n++) {
 	print "  {"
 	print "    \"" fpus[n] "\","
-	print "    {"
-	print "      " fpu_isa[fpus[n]] ","
-	print "      isa_nobit"
-	print "    }"
-	print "  },"
+	print_isa_bits_for(fpu_isa[fpus[n]], "    ")
+	print "\n  },"
     }
 
+    print "};"
+}
+
+function gen_native () {
+    boilerplate("C")
+
+    for (vendor in vendor_ids) {
+	print "static struct vendor_cpu vendor"vendor"_cpu_table[] = {"
+	ncpus = split (cpu_list, cpus)
+
+	for (n = 1; n <= ncpus; n++) {
+	    if ((cpus[n] in cpu_vendor) && (cpus[n] in cpu_part)	\
+		&& cpu_vendor[cpus[n]] == vendor) {
+		print "  {\"0x"cpu_part[cpus[n]]"\", \""cpu_arch[cpus[n]]"\", \""cpus[n]"\"},"
+	    }
+	}
+	print "  {NULL, NULL, NULL}"
+	print "};"
+    }
+
+    print "\nstatic struct vendor vendors_table[] = {"
+    for (vendor in vendor_ids) {
+	print "  {\"0x"vendor"\", vendor"vendor"_cpu_table},"
+    }
+    print "  {NULL, NULL}"
     print "};"
 }
 
@@ -430,7 +486,7 @@ function gen_opt () {
 function check_cpu (name) {
     exts = split (name, extensions, "+")
 
-    if (! extensions[1] in cpu_cnames) {
+    if (! (extensions[1] in cpu_cnames)) {
 	return "error"
     }
 
@@ -444,15 +500,16 @@ function check_cpu (name) {
 }
 
 function check_fpu (name) {
-    if (name in fpu_cnames) {
-	print fpu_cnames[name]
-    } else print "error"
+    if (! (name in fpu_cnames)) {
+	return "error"
+    }
+    return fpu_cnames[name]
 }
 
 function check_arch (name) {
     exts = split (name, extensions, "+")
 
-    if (! extensions[1] in arch_isa) {
+    if (! (extensions[1] in arch_isa)) {
 	return "error"
     }
 
@@ -470,25 +527,68 @@ BEGIN {
     arch_name = ""
     fpu_name = ""
     lineno = 0
+    fatal_err = 0
+    parse_done = 0
     if (cmd == "") fatal("Usage parsecpu.awk -v cmd=<xyz>")
 }
 
+# New line.  Reset parse status and increment line count for error messages
 // {
     lineno++
     parse_ok = 0
 }
 
+# Comments must be on a line on their own.
 /^#/ {
     parse_ok = 1
 }
 
+/^define feature / {
+    if (NF != 3) fatal("syntax: define feature <name>")
+    toplevel()
+    fbit = $3
+    if (fbit in features) fatal("feature " fbit " already defined")
+    features[fbit] = 1
+    parse_ok = 1
+}
+
+/^define fgroup / {
+    if (NF < 4) fatal("syntax: define fgroup <name> <feature> [<feature>]*")
+    toplevel()
+    fgrp = $3
+    if (fgrp in fgroup) fatal("feature group " fgrp " already defined")
+    if (fgrp in features) fatal("feature group " fgrp " aliases a feature")
+    fcount = NF
+    for (n = 4; n <= fcount; n++) {
+	feat = $n
+	if (feat in features) {
+	    fgrp_bits[fgrp,feat] = 1
+	} else if (feat in fgroup) {
+	    # fgroups may reference other fgroups, copy their bits
+	    # to our bits.  To avoid recursion we don't set fgroup[fgrp]
+	    # until after we have done this, so such attempts will result
+	    # in an invalid group definition.
+	    for (bitcomb in fgrp_bits) {
+		split (bitcomb, bitsep, SUBSEP)
+		if (bitsep[1] == feat) {
+		    fgrp_bits[fgrp,bitsep[2]] = 1
+		}
+	    }
+	} else fatal("feature group member " feat " unrecognized")
+    }
+    fgroup[fgrp] = 1
+    parse_ok = 1
+}
+
 /^begin fpu / {
+    if (NF != 3) fatal("syntax: begin fpu <name>")
     toplevel()
     fpu_name = $3
     parse_ok = 1
 }
 
 /^end fpu / {
+    if (NF != 3) fatal("syntax: end fpu <name>")
     if (fpu_name != $3) fatal("mimatched end fpu")
     if (! (fpu_name in fpu_isa)) {
 	fatal("fpu definition \"" fpu_name "\" lacks an \"isa\" statement")
@@ -501,29 +601,33 @@ BEGIN {
 }
 
 /^begin arch / {
+    if (NF != 3) fatal("syntax: begin arch <name>")
     toplevel()
     arch_name = $3
     parse_ok = 1
 }
 
 /^[ 	]*base / {
+    if (NF != 2) fatal("syntax: base <architecture-base-name>")
     if (arch_name == "") fatal("\"base\" statement outside of arch block")
     arch_base[arch_name] = $2
     parse_ok = 1
 }
 
 /^[ 	]*profile / {
+    if (NF != 2) fatal("syntax: profile <profile-name>")
     if (arch_name == "") fatal("\"profile\" statement outside of arch block")
     arch_prof[arch_name] = $2
     parse_ok = 1
 }
 
 /^end arch / {
+    if (NF != 3) fatal("syntax: end arch <name>")
     if (arch_name != $3) fatal("mimatched end arch")
-    if (! arch_name in arch_tune_for) {
+    if (! (arch_name in arch_tune_for)) {
 	fatal("arch definition lacks a \"tune for\" statement")
     }
-    if (! arch_name in arch_isa) {
+    if (! (arch_name in arch_isa)) {
 	fatal("arch definition lacks an \"isa\" statement")
     }
     arch_list = arch_list " " arch_name
@@ -534,18 +638,21 @@ BEGIN {
 }
 
 /^begin cpu / {
+    if (NF != 3) fatal("syntax: begin cpu <name>")
     toplevel()
     cpu_name = $3
     parse_ok = 1
 }
 
 /^[ 	]*cname / {
+    if (NF != 2) fatal("syntax: cname <identifier>")
     if (cpu_name == "") fatal("\"cname\" outside of cpu block")
     cpu_cnames[cpu_name] = $2
     parse_ok = 1
 }
 
 /^[ 	]*tune for / {
+    if (NF != 3) fatal("syntax: tune for <cpu-name>")
     if (cpu_name != "") {
 	cpu_tune_for[cpu_name] = $3
     } else if (arch_name != "") {
@@ -555,6 +662,7 @@ BEGIN {
 }
 
 /^[ 	]*tune flags / {
+    if (NF < 3) fatal("syntax: tune flags <flag> [<flag>]*")
     flags=""
     flag_count = NF
     for (n = 3; n <= flag_count; n++) {
@@ -571,24 +679,20 @@ BEGIN {
 }
 
 /^[ 	]*architecture / {
+    if (NF != 2) fatal("syntax: architecture <arch-name>")
     if (cpu_name == "") fatal("\"architecture\" outside of cpu block")
     cpu_arch[cpu_name] = $2
     parse_ok = 1
 }
 
-/^[ 	]*fpu / {
-    if (cpu_name == "") fatal("\"fpu\" outside of cpu block")
-    cpu_fpu[cpu_name] = $2
-    parse_ok = 1
-}
-
 /^[ 	]*isa / {
+    if (NF < 2) fatal("syntax: isa <feature-or-fgroup> [<feature-or-fgroup>]*")
     flags=""
     flag_count = NF
     for (n = 2; n <= flag_count; n++) {
 	if (n == 2) {
-	    flags = isa_pfx($n)
-	} else flags = flags "," isa_pfx($n)
+	    flags = $n
+	} else flags = flags " " $n
     }
     if (cpu_name != "") {
 	cpu_isa[cpu_name] = flags
@@ -601,6 +705,7 @@ BEGIN {
 }
 
 /^[ 	]*option / {
+    if (NF < 4) fatal("syntax: option <name> add|remove <feature-or-fgroup>+")
     name=$2
     if ($3 == "add") {
 	remove = "false"
@@ -611,8 +716,8 @@ BEGIN {
     flag_count = NF
     for (n = 4; n <= flag_count; n++) {
 	if (n == 4) {
-	    flags = isa_pfx($n)
-	} else flags = flags "," isa_pfx($n)
+	    flags = $n
+	} else flags = flags " " $n
     }
     if (cpu_name != "") {
 	cpu_opts[cpu_name] = cpu_opts[cpu_name] " " name
@@ -627,6 +732,7 @@ BEGIN {
 }
 
 /^[ 	]*optalias / {
+    if (NF != 3) fatal("syntax: optalias <name> <option-name>")
     name=$2
     alias=$3
     if (cpu_name != "") {
@@ -640,18 +746,40 @@ BEGIN {
 }
 
 /^[ 	]*costs / {
+    if (NF != 2) fatal("syntax: costs <identifier>")
     if (cpu_name == "") fatal("\"costs\" outside of cpu block")
     cpu_cost[cpu_name] = $2
     parse_ok = 1
 }
 
+/^[ 	]*vendor / {
+    if (NF != 2) fatal("syntax: vendor <vendor-id>")
+    if (cpu_name == "") fatal("\"vendor\" outside of cpu block")
+    cpu_vendor[cpu_name] = $2
+    vendor_ids[$2] = 1
+    parse_ok = 1
+}
+
+/^[ 	]*part / {
+    if (NF < 2 || NF > 4) fatal("syntax: part <part-id> [minrev [maxrev]]")
+    if (cpu_name == "") fatal("\"part\" outside of cpu block")
+    cpu_part[cpu_name] = $2
+    if (NF > 2) cpu_minrev[cpu_name] = $3
+    if (NF == 4) cpu_maxrev[cpu_name] = $4
+    parse_ok = 1
+}
+
 /^end cpu / {
+    if (NF != 3) fatal("syntax: end cpu <name>")
     if (cpu_name != $3) fatal("mimatched end cpu")
     if (! (cpu_name in cpu_cnames)) {
 	cpu_cnames[cpu_name] = cpu_name
 	gsub(/[-+.]/, "_", cpu_cnames[cpu_name])
     }
-    if (! cpu_name in cpu_arch) fatal("cpu definition lacks an architecture")
+    if (! (cpu_name in cpu_arch)) fatal("cpu definition lacks an architecture")
+    if ((cpu_name in cpu_part) && !(cpu_name in cpu_vendor)) {
+	fatal("part number specified for " cpu_name " but no vendor")
+    }
     cpu_list = cpu_list " " cpu_name
     cpu_name = ""
     parse_ok = 1
@@ -662,13 +790,19 @@ BEGIN {
 }
 
 END {
+    parse_done = 1
+    if (fatal_err) exit 1
     toplevel()
     if (cmd == "data") {
 	gen_data()
     } else if (cmd == "common-data") {
 	gen_comm_data()
+    } else if (cmd == "native") {
+	gen_native()
     } else if (cmd == "headers") {
 	gen_headers()
+    } else if (cmd == "isa") {
+	gen_isa()
     } else if (cmd == "md") {
 	gen_md()
     } else if (cmd == "opt") {
@@ -681,6 +815,6 @@ END {
 	print check_arch(target[2])
     } else if (cmd ~ /^chkfpu /) {
 	split (cmd, target)
-	check_fpu(target[2])
+	print check_fpu(target[2])
     } else fatal("unrecognized command: "cmd)
 }

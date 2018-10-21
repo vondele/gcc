@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 2001-2017, Free Software Foundation, Inc.         --
+--          Copyright (C) 2001-2018, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -324,6 +324,16 @@ package body Layout is
            and then not Debug_Flag_6
          then
             Init_Size (E, 2 * System_Address_Size);
+
+         --  If unnesting subprograms, subprogram access types contain the
+         --  address of both the subprogram and an activation record. But if we
+         --  set that, we'll get a warning on different unchecked conversion
+         --  sizes in the RTS. So leave unset in that case.
+
+         elsif Unnest_Subprogram_Mode
+           and then Is_Access_Subprogram_Type (E)
+         then
+            null;
 
          --  Normal case of thin pointer
 
@@ -843,7 +853,7 @@ package body Layout is
    -- Set_Elem_Alignment --
    ------------------------
 
-   procedure Set_Elem_Alignment (E : Entity_Id) is
+   procedure Set_Elem_Alignment (E : Entity_Id; Align : Nat := 0) is
    begin
       --  Do not set alignment for packed array types, this is handled in the
       --  backend.
@@ -869,15 +879,12 @@ package body Layout is
          return;
       end if;
 
-      --  Here we calculate the alignment as the largest power of two multiple
-      --  of System.Storage_Unit that does not exceed either the object size of
-      --  the type, or the maximum allowed alignment.
+      --  We attempt to set the alignment in all the other cases
 
       declare
          S : Int;
          A : Nat;
-
-         Max_Alignment : Nat;
+         M : Nat;
 
       begin
          --  The given Esize may be larger that int'last because of a previous
@@ -908,7 +915,7 @@ package body Layout is
            and then S = 8
            and then Is_Floating_Point_Type (E)
          then
-            Max_Alignment := Ttypes.Target_Double_Float_Alignment;
+            M := Ttypes.Target_Double_Float_Alignment;
 
          --  If the default alignment of "double" or larger scalar types is
          --  specifically capped, enforce the cap.
@@ -917,18 +924,27 @@ package body Layout is
            and then S >= 8
            and then Is_Scalar_Type (E)
          then
-            Max_Alignment := Ttypes.Target_Double_Scalar_Alignment;
+            M := Ttypes.Target_Double_Scalar_Alignment;
 
          --  Otherwise enforce the overall alignment cap
 
          else
-            Max_Alignment := Ttypes.Maximum_Alignment;
+            M := Ttypes.Maximum_Alignment;
          end if;
 
-         A := 1;
-         while 2 * A <= Max_Alignment and then 2 * A <= S loop
-            A := 2 * A;
-         end loop;
+         --  We calculate the alignment as the largest power-of-two multiple
+         --  of System.Storage_Unit that does not exceed the object size of
+         --  the type and the maximum allowed alignment, if none was specified.
+         --  Otherwise we only cap it to the maximum allowed alignment.
+
+         if Align = 0 then
+            A := 1;
+            while 2 * A <= S and then 2 * A <= M loop
+               A := 2 * A;
+            end loop;
+         else
+            A := Nat'Min (Align, M);
+         end if;
 
          --  If alignment is currently not set, then we can safely set it to
          --  this new calculated value.

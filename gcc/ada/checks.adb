@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2017, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2018, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -1458,6 +1458,19 @@ package body Checks is
          T_Typ := Typ;
       end if;
 
+      --  If the expression is a function call that returns a limited object
+      --  it cannot be copied. It is not clear how to perform the proper
+      --  discriminant check in this case because the discriminant value must
+      --  be retrieved from the constructed object itself.
+
+      if Nkind (N) = N_Function_Call
+        and then Is_Limited_Type (Typ)
+        and then Is_Entity_Name (Name (N))
+        and then Returns_By_Ref (Entity (Name (N)))
+      then
+         return;
+      end if;
+
       --  Only apply checks when generating code and discriminant checks are
       --  not suppressed. In GNATprove mode, we do not apply the checks, but we
       --  still analyze the expression to possibly issue errors on SPARK code
@@ -1860,29 +1873,36 @@ package body Checks is
       pragma Assert (Do_Division_Check (N));
 
       Loc   : constant Source_Ptr := Sloc (N);
-      Right : constant Node_Id    := Right_Opnd (N);
+      Right : constant Node_Id := Right_Opnd (N);
+      Opnd  : Node_Id;
 
    begin
       if Expander_Active
         and then not Backend_Divide_Checks_On_Target
         and then Check_Needed (Right, Division_Check)
+
+        --  See if division by zero possible, and if so generate test. This
+        --  part of the test is not controlled by the -gnato switch, since it
+        --  is a Division_Check and not an Overflow_Check.
+
+        and then Do_Division_Check (N)
       then
-         --  See if division by zero possible, and if so generate test. This
-         --  part of the test is not controlled by the -gnato switch, since
-         --  it is a Division_Check and not an Overflow_Check.
+         Set_Do_Division_Check (N, False);
 
-         if Do_Division_Check (N) then
-            Set_Do_Division_Check (N, False);
-
-            if (not ROK) or else (Rlo <= 0 and then 0 <= Rhi) then
-               Insert_Action (N,
-                 Make_Raise_Constraint_Error (Loc,
-                   Condition =>
-                     Make_Op_Eq (Loc,
-                       Left_Opnd  => Duplicate_Subexpr_Move_Checks (Right),
-                       Right_Opnd => Make_Integer_Literal (Loc, 0)),
-                   Reason => CE_Divide_By_Zero));
+         if (not ROK) or else (Rlo <= 0 and then 0 <= Rhi) then
+            if Is_Floating_Point_Type (Etype (N)) then
+               Opnd := Make_Real_Literal (Loc, Ureal_0);
+            else
+               Opnd := Make_Integer_Literal (Loc, 0);
             end if;
+
+            Insert_Action (N,
+              Make_Raise_Constraint_Error (Loc,
+                Condition =>
+                  Make_Op_Eq (Loc,
+                    Left_Opnd  => Duplicate_Subexpr_Move_Checks (Right),
+                    Right_Opnd => Opnd),
+                Reason    => CE_Divide_By_Zero));
          end if;
       end if;
    end Apply_Division_Check;
@@ -2765,7 +2785,6 @@ package body Checks is
       S_Typ   : Entity_Id;
       Arr     : Node_Id   := Empty;  -- initialize to prevent warning
       Arr_Typ : Entity_Id := Empty;  -- initialize to prevent warning
-      OK      : Boolean   := False;  -- initialize to prevent warning
 
       Is_Subscr_Ref : Boolean;
       --  Set true if Expr is a subscript
@@ -2995,10 +3014,11 @@ package body Checks is
               and then Compile_Time_Known_Value (Thi)
             then
                declare
+                  OK  : Boolean := False;  -- initialize to prevent warning
                   Hiv : constant Uint := Expr_Value (Thi);
                   Lov : constant Uint := Expr_Value (Tlo);
-                  Hi  : Uint;
-                  Lo  : Uint;
+                  Hi  : Uint := No_Uint;
+                  Lo  : Uint := No_Uint;
 
                begin
                   --  If range is null, we for sure have a constraint error (we
@@ -3065,7 +3085,17 @@ package body Checks is
                      --  If definitely not in range, warn
 
                      elsif Lov > Hi or else Hiv < Lo then
-                        Bad_Value;
+
+                        --  Ignore out of range values for System.Priority in
+                        --  CodePeer mode since the actual target compiler may
+                        --  provide a wider range.
+
+                        if not CodePeer_Mode
+                          or else Target_Typ /= RTE (RE_Priority)
+                        then
+                           Bad_Value;
+                        end if;
+
                         return;
 
                      --  Otherwise we don't know
@@ -3518,9 +3548,22 @@ package body Checks is
                  and then not GNATprove_Mode
                then
                   Apply_Float_Conversion_Check (Expr, Target_Type);
+
                else
-                  Apply_Scalar_Range_Check
-                    (Expr, Target_Type, Fixed_Int => Conv_OK);
+                  --  Conversions involving fixed-point types are expanded
+                  --  separately, and do not need a Range_Check flag, except
+                  --  in SPARK_Mode, where the explicit constraint check will
+                  --  not be generated.
+
+                  if GNATprove_Mode
+                    or else not Is_Fixed_Point_Type (Expr_Type)
+                  then
+                     Apply_Scalar_Range_Check
+                       (Expr, Target_Type, Fixed_Int => Conv_OK);
+
+                  else
+                     Set_Do_Range_Check (Expression (N), False);
+                  end if;
 
                   --  If the target type has predicates, we need to indicate
                   --  the need for a check, even if Determine_Range finds that
@@ -3747,9 +3790,9 @@ package body Checks is
 
       function Aggregate_Discriminant_Val (Disc : Entity_Id) return Node_Id;
 
-      ----------------------------------
-      -- Aggregate_Discriminant_Value --
-      ----------------------------------
+      --------------------------------
+      -- Aggregate_Discriminant_Val --
+      --------------------------------
 
       function Aggregate_Discriminant_Val (Disc : Entity_Id) return Node_Id is
          Assoc : Node_Id;
@@ -4370,8 +4413,8 @@ package body Checks is
       Hi_Left : Uint;
       --  Lo and Hi bounds of left operand
 
-      Lo_Right : Uint;
-      Hi_Right : Uint;
+      Lo_Right : Uint := No_Uint;
+      Hi_Right : Uint := No_Uint;
       --  Lo and Hi bounds of right (or only) operand
 
       Bound : Node_Id;
@@ -4458,6 +4501,11 @@ package body Checks is
         --  We don't deal with anything except discrete types
 
         or else not Is_Discrete_Type (Typ)
+
+        --  Don't deal with enumerated types with non-standard representation
+
+        or else (Is_Enumeration_Type (Typ)
+                   and then Present (Enum_Pos_To_Rep (Base_Type (Typ))))
 
         --  Ignore type for which an error has been posted, since range in
         --  this case may well be a bogosity deriving from the error. Also
@@ -4909,8 +4957,8 @@ package body Checks is
       Hi_Left : Ureal;
       --  Lo and Hi bounds of left operand
 
-      Lo_Right : Ureal;
-      Hi_Right : Ureal;
+      Lo_Right : Ureal := No_Ureal;
+      Hi_Right : Ureal := No_Ureal;
       --  Lo and Hi bounds of right (or only) operand
 
       Bound : Node_Id;
@@ -5398,8 +5446,10 @@ package body Checks is
          elsif Checks_May_Be_Suppressed (E) then
             if Is_Check_Suppressed (E, Elaboration_Check) then
                return True;
+
             elsif Dynamic_Elaboration_Checks then
                return Is_Check_Suppressed (E, All_Checks);
+
             else
                return False;
             end if;
@@ -5408,8 +5458,10 @@ package body Checks is
 
       if Scope_Suppress.Suppress (Elaboration_Check) then
          return True;
+
       elsif Dynamic_Elaboration_Checks then
          return Scope_Suppress.Suppress (All_Checks);
+
       else
          return False;
       end if;
@@ -5936,6 +5988,10 @@ package body Checks is
       --  In addition, we force a check if Force_Validity_Checks is set
 
       elsif not Comes_From_Source (Expr)
+        and then not
+          (Nkind (Expr) = N_Identifier
+            and then Present (Renamed_Object (Entity (Expr)))
+            and then Comes_From_Source (Renamed_Object (Entity (Expr))))
         and then not Force_Validity_Checks
         and then (Nkind (Expr) /= N_Unchecked_Type_Conversion
                     or else Kill_Range_Check (Expr))
@@ -6719,9 +6775,36 @@ package body Checks is
       -----------------------------
 
       procedure Convert_And_Check_Range is
-         Tnn : constant Entity_Id := Make_Temporary (Loc, 'T', N);
+         Tnn       : constant Entity_Id := Make_Temporary (Loc, 'T', N);
+         Conv_Node : Node_Id;
 
       begin
+         --  For enumeration types with non-standard representation this is a
+         --  direct conversion from the enumeration type to the target integer
+         --  type, which is treated by the back end as a normal integer type
+         --  conversion, treating the enumeration type as an integer, which is
+         --  exactly what we want. We set Conversion_OK to make sure that the
+         --  analyzer does not complain about what otherwise might be an
+         --  illegal conversion.
+
+         if Is_Enumeration_Type (Source_Base_Type)
+           and then Present (Enum_Pos_To_Rep (Source_Base_Type))
+           and then Is_Integer_Type (Target_Base_Type)
+         then
+            Conv_Node :=
+              OK_Convert_To
+                (Typ  => Target_Base_Type,
+                 Expr => Duplicate_Subexpr (N));
+
+         --  Common case
+
+         else
+            Conv_Node :=
+              Make_Type_Conversion (Loc,
+                Subtype_Mark => New_Occurrence_Of (Target_Base_Type, Loc),
+                Expression   => Duplicate_Subexpr (N));
+         end if;
+
          --  We make a temporary to hold the value of the converted value
          --  (converted to the base type), and then do the test against this
          --  temporary. The conversion itself is replaced by an occurrence of
@@ -6737,10 +6820,7 @@ package body Checks is
              Defining_Identifier => Tnn,
              Object_Definition   => New_Occurrence_Of (Target_Base_Type, Loc),
              Constant_Present    => True,
-             Expression          =>
-               Make_Type_Conversion (Loc,
-                 Subtype_Mark => New_Occurrence_Of (Target_Base_Type, Loc),
-                 Expression   => Duplicate_Subexpr (N))),
+             Expression          => Conv_Node),
 
            Make_Raise_Constraint_Error (Loc,
              Condition =>
@@ -6804,8 +6884,16 @@ package body Checks is
       --  evaluation is always a potential source of inefficiency, and is
       --  functionally incorrect in the volatile case.
 
-      if not Is_Entity_Name (N) or else Treat_As_Volatile (Entity (N)) then
-         Force_Evaluation (N);
+      --  We skip the evaluation of attribute references because, after these
+      --  runtime checks are generated, the expander may need to rewrite this
+      --  node (for example, see Attribute_Max_Size_In_Storage_Elements in
+      --  Expand_N_Attribute_Reference).
+
+      if Nkind (N) /= N_Attribute_Reference
+        and then (not Is_Entity_Name (N)
+                   or else Treat_As_Volatile (Entity (N)))
+      then
+         Force_Evaluation (N, Mode => Strict);
       end if;
 
       --  The easiest case is when Source_Base_Type and Target_Base_Type are
@@ -7679,6 +7767,13 @@ package body Checks is
    --  Start of processing for Install_Null_Excluding_Check
 
    begin
+      --  No need to add null-excluding checks when the tree may not be fully
+      --  decorated.
+
+      if Serious_Errors_Detected > 0 then
+         return;
+      end if;
+
       pragma Assert (Is_Access_Type (Typ));
 
       --  No check inside a generic, check will be emitted in instance
@@ -7833,10 +7928,11 @@ package body Checks is
       Subp_Id   : constant Entity_Id  := Unique_Defining_Entity (Subp_Body);
       Subp_Decl : constant Node_Id    := Unit_Declaration_Node (Subp_Id);
 
-      Decls   : List_Id;
-      Flag_Id : Entity_Id;
-      Set_Ins : Node_Id;
-      Tag_Typ : Entity_Id;
+      Decls    : List_Id;
+      Flag_Id  : Entity_Id;
+      Set_Ins  : Node_Id;
+      Set_Stmt : Node_Id;
+      Tag_Typ  : Entity_Id;
 
    --  Start of processing for Install_Primitive_Elaboration_Check
 
@@ -7870,8 +7966,8 @@ package body Checks is
       elsif Nkind (Context) = N_Compilation_Unit then
          return;
 
-      --  Only nonabstract library-level source primitives are considered for
-      --  this check.
+      --  Do not consider anything other than nonabstract library-level source
+      --  primitives.
 
       elsif not
         (Comes_From_Source (Subp_Id)
@@ -7927,7 +8023,7 @@ package body Checks is
 
       Flag_Id :=
         Make_Defining_Identifier (Loc,
-          Chars => New_External_Name (Chars (Subp_Id), 'F', -1));
+          Chars => New_External_Name (Chars (Subp_Id), 'E', -1));
       Set_Is_Frozen (Flag_Id);
 
       --  Insert the declaration of the elaboration flag in front of the
@@ -7936,7 +8032,7 @@ package body Checks is
       Push_Scope (Scope (Subp_Id));
 
       --  Generate:
-      --    F : Boolean := False;
+      --    E : Boolean := False;
 
       Insert_Action (Subp_Decl,
         Make_Object_Declaration (Loc,
@@ -7986,12 +8082,20 @@ package body Checks is
       end if;
 
       --  Generate:
-      --    F := True;
+      --    E := True;
 
-      Insert_After_And_Analyze (Set_Ins,
+      Set_Stmt :=
         Make_Assignment_Statement (Loc,
           Name       => New_Occurrence_Of (Flag_Id, Loc),
-          Expression => New_Occurrence_Of (Standard_True, Loc)));
+          Expression => New_Occurrence_Of (Standard_True, Loc));
+
+      --  Mark the assignment statement as elaboration code. This allows the
+      --  early call region mechanism (see Sem_Elab) to properly ignore such
+      --  assignments even though they are non-preelaborable code.
+
+      Set_Is_Elaboration_Code (Set_Stmt);
+
+      Insert_After_And_Analyze (Set_Ins, Set_Stmt);
    end Install_Primitive_Elaboration_Check;
 
    --------------------------
@@ -8060,12 +8164,14 @@ package body Checks is
       --  since it clearly was not overridden at any point). For a predefined
       --  check, we test the specific flag. For a user defined check, we check
       --  the All_Checks flag. The Overflow flag requires special handling to
-      --  deal with the General vs Assertion case
+      --  deal with the General vs Assertion case.
 
       if C = Overflow_Check then
          return Overflow_Checks_Suppressed (Empty);
+
       elsif C in Predefined_Check_Id then
          return Scope_Suppress.Suppress (C);
+
       else
          return Scope_Suppress.Suppress (All_Checks);
       end if;
@@ -8352,6 +8458,12 @@ package body Checks is
    --  Start of processing for Minimize_Eliminate_Overflows
 
    begin
+      --  Default initialize Lo and Hi since these are not guaranteed to be
+      --  set otherwise.
+
+      Lo := No_Uint;
+      Hi := No_Uint;
+
       --  Case where we do not have a signed integer arithmetic operation
 
       if not Is_Signed_Integer_Arithmetic_Op (N) then
@@ -9804,7 +9916,7 @@ package body Checks is
       Do_Access   : Boolean := False;
       Wnode       : Node_Id  := Warn_Node;
       Ret_Result  : Check_Result := (Empty, Empty);
-      Num_Checks  : Integer := 0;
+      Num_Checks  : Natural := 0;
 
       procedure Add_Check (N : Node_Id);
       --  Adds the action given to Ret_Result if N is non-Empty

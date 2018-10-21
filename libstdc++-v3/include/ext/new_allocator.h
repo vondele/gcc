@@ -1,6 +1,6 @@
 // Allocator that wraps operator new -*- C++ -*-
 
-// Copyright (C) 2001-2017 Free Software Foundation, Inc.
+// Copyright (C) 2001-2018 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -76,11 +76,14 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       typedef std::true_type propagate_on_container_move_assignment;
 #endif
 
+      _GLIBCXX20_CONSTEXPR
       new_allocator() _GLIBCXX_USE_NOEXCEPT { }
 
+      _GLIBCXX20_CONSTEXPR
       new_allocator(const new_allocator&) _GLIBCXX_USE_NOEXCEPT { }
 
       template<typename _Tp1>
+	_GLIBCXX20_CONSTEXPR
 	new_allocator(const new_allocator<_Tp1>&) _GLIBCXX_USE_NOEXCEPT { }
 
       ~new_allocator() _GLIBCXX_USE_NOEXCEPT { }
@@ -127,7 +130,13 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
 
       size_type
       max_size() const _GLIBCXX_USE_NOEXCEPT
-      { return size_t(-1) / sizeof(_Tp); }
+      {
+#if __PTRDIFF_MAX__ < __SIZE_MAX__
+	return size_t(__PTRDIFF_MAX__) / sizeof(_Tp);
+#else
+	return size_t(-1) / sizeof(_Tp);
+#endif
+      }
 
 #if __cplusplus >= 201103L
       template<typename _Up, typename... _Args>
@@ -148,17 +157,19 @@ _GLIBCXX_BEGIN_NAMESPACE_VERSION
       void
       destroy(pointer __p) { __p->~_Tp(); }
 #endif
+
+      template<typename _Up>
+	friend bool
+	operator==(const new_allocator&, const new_allocator<_Up>&)
+	_GLIBCXX_NOTHROW
+	{ return true; }
+
+      template<typename _Up>
+	friend bool
+	operator!=(const new_allocator&, const new_allocator<_Up>&)
+	_GLIBCXX_NOTHROW
+	{ return false; }
     };
-
-  template<typename _Tp>
-    inline bool
-    operator==(const new_allocator<_Tp>&, const new_allocator<_Tp>&)
-    { return true; }
-
-  template<typename _Tp>
-    inline bool
-    operator!=(const new_allocator<_Tp>&, const new_allocator<_Tp>&)
-    { return false; }
 
 _GLIBCXX_END_NAMESPACE_VERSION
 } // namespace

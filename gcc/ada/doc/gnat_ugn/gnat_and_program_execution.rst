@@ -17,7 +17,7 @@ GNAT and Program Execution
 This chapter covers several topics:
 
 * `Running and Debugging Ada Programs`_
-* `Code Coverage and Profiling`_
+* `Profiling`_
 * `Improving Performance`_
 * `Overflow Check Handling in GNAT`_
 * `Performing Dimensionality Analysis in GNAT`_
@@ -1206,103 +1206,16 @@ documentation
 for more information.
 
 
-.. index:: Code Coverage
 .. index:: Profiling
 
 
-.. _Code_Coverage_and_Profiling:
+.. _Profiling:
 
-Code Coverage and Profiling
-===========================
+Profiling
+=========
 
-This section describes how to use the ``gcov`` coverage testing tool and
-the ``gprof`` profiler tool on Ada programs.
-
-.. index:: !  gcov
-
-.. _Code_Coverage_of_Ada_Programs_with_gcov:
-
-Code Coverage of Ada Programs with gcov
----------------------------------------
-
-``gcov`` is a test coverage program: it analyzes the execution of a given
-program on selected tests, to help you determine the portions of the program
-that are still untested.
-
-``gcov`` is part of the GCC suite, and is described in detail in the GCC
-User's Guide. You can refer to this documentation for a more complete
-description.
-
-This chapter provides a quick startup guide, and
-details some GNAT-specific features.
-
-.. _Quick_startup_guide:
-
-Quick startup guide
-^^^^^^^^^^^^^^^^^^^
-
-In order to perform coverage analysis of a program using ``gcov``, several
-steps are needed:
-
-#. Instrument the code during the compilation process,
-#. Execute the instrumented program, and
-#. Invoke the ``gcov`` tool to generate the coverage results.
-
-.. index:: -fprofile-arcs (gcc)
-.. index:: -ftest-coverage (gcc
-.. index:: -fprofile-arcs (gnatbind)
-
-The code instrumentation needed by gcov is created at the object level.
-The source code is not modified in any way, because the instrumentation code is
-inserted by gcc during the compilation process. To compile your code with code
-coverage activated, you need to recompile your whole project using the
-switches
-:switch:`-fprofile-arcs` and :switch:`-ftest-coverage`, and link it using
-:switch:`-fprofile-arcs`.
-
-  ::
-
-     $ gnatmake -P my_project.gpr -f -cargs -fprofile-arcs -ftest-coverage \\
-        -largs -fprofile-arcs
-
-This compilation process will create :file:`.gcno` files together with
-the usual object files.
-
-Once the program is compiled with coverage instrumentation, you can
-run it as many times as needed -- on portions of a test suite for
-example. The first execution will produce :file:`.gcda` files at the
-same location as the :file:`.gcno` files.  Subsequent executions
-will update those files, so that a cumulative result of the covered
-portions of the program is generated.
-
-Finally, you need to call the ``gcov`` tool. The different options of
-``gcov`` are described in the GCC User's Guide, section *Invoking gcov*.
-
-This will create annotated source files with a :file:`.gcov` extension:
-:file:`my_main.adb` file will be analyzed in :file:`my_main.adb.gcov`.
-
-
-.. _GNAT_specifics:
-
-GNAT specifics
-^^^^^^^^^^^^^^
-
-Because of Ada semantics, portions of the source code may be shared among
-several object files. This is the case for example when generics are
-involved, when inlining is active  or when declarations generate  initialisation
-calls. In order to take
-into account this shared code, you need to call ``gcov`` on all
-source files of the tested program at once.
-
-The list of source files might exceed the system's maximum command line
-length. In order to bypass this limitation, a new mechanism has been
-implemented in ``gcov``: you can now list all your project's files into a
-text file, and provide this file to gcov as a parameter,  preceded by a ``@``
-(e.g. :samp:`gcov @mysrclist.txt`).
-
-Note that on AIX compiling a static library with :switch:`-fprofile-arcs` is
-not supported as there can be unresolved symbols during the final link.
-
+This section describes how to use the the ``gprof`` profiler tool on Ada
+programs.
 
 .. index:: !  gprof
 .. index:: Profiling
@@ -1324,7 +1237,6 @@ better handle Ada programs and multitasking.
 It is currently supported on the following platforms
 
 * linux x86/x86_64
-* solaris sparc/sparc64/x86
 * windows x86
 
 In order to profile a program using ``gprof``, several steps are needed:
@@ -2700,7 +2612,7 @@ appropriate options.
   ``gnatelim`` is a project-aware tool.
   (See :ref:`Using_Project_Files_with_GNAT_Tools` for a description of
   the project-related switches but note that ``gnatelim`` does not support
-  the :samp:`-U`, :samp:`-U {main_unit}`, :samp:`--subdirs={dir}`, or
+  the :samp:`-U {main_unit}`, :samp:`--subdirs={dir}`, or
   :samp:`--no_objects_dir` switches.)
   The project file package that can specify
   ``gnatelim`` switches is named ``Eliminate``.
@@ -2730,24 +2642,22 @@ appropriate options.
   treats these files as a complete set of sources making up a program to
   analyse, and analyses only these sources.
 
-  After a full successful build of the main subprogram ``gnatelim`` can be
-  called without  specifying sources to analyse, in this case it computes
-  the source closure of the main unit from the :file:`ALI` files.
+  If ``gnatelim`` is called with a project file and :samp:`-U` option is
+  used, then in process all the files from the argument project but
+  not just the closure of the main subprogram.
+
+  In all the other cases (that are typical cases of ``gnatelim`` usage, when
+  the only ``gnatelim`` parameter is the name of the source file containing
+  the main subprogram) gnatelim needs the full closure of the main subprogram.
+  When called with a project file, gnatelim computes this closure itself.
+  Otherwise it assumes that it can reuse the results of the previous
+  build of the main subprogram.
 
   If the set of sources to be processed by ``gnatelim`` contains sources with
   preprocessing directives
   then the needed options should be provided to run preprocessor as a part of
   the ``gnatelim`` call, and the generated set of pragmas ``Eliminate``
   will correspond to preprocessed sources.
-
-  The following command will create the set of :file:`ALI` files needed for
-  ``gnatelim``:
-
-    ::
-
-       $ gnatmake -c Main_Prog
-
-  Note that ``gnatelim`` does not need object files.
 
 
   .. _Running_gnatelim:
@@ -2814,6 +2724,15 @@ appropriate options.
     equivalent ``gnatmake`` flag (:ref:`Switches_for_gnatmake`).
 
 
+  .. index:: -U (gnatelim)
+
+  :samp:`-U`
+    Process all the sources from the argument project. If no project file
+    is specified, this option has no effect. If this option is used with the
+    project file, ``gnatelim`` does not require the preliminary build of the
+    argument main subprogram.
+
+
   .. index:: -files (gnatelim)
 
   :samp:`-files={filename}`
@@ -2858,6 +2777,8 @@ appropriate options.
     of the argument sources). On a multiprocessor machine this speeds up processing
     of big sets of argument sources. If ``n`` is 0, then the maximum number of
     parallel tree creations is the number of core processors on the platform.
+    This possibility is disabled if ``gnatelim`` has to compute the closure
+    of the main unit.
 
 
   .. index:: -q (gnatelim)
@@ -2924,61 +2845,11 @@ appropriate options.
   your program from scratch after that, because you need a consistent
   configuration file(s) during the entire compilation.
 
-
-  .. _Making_Your_Executables_Smaller:
-
-  Making Your Executables Smaller
-  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-  In order to get a smaller executable for your program you now have to
-  recompile the program completely with the configuration file containing
-  pragmas Eliminate generated by gnatelim. If these pragmas are placed in
-  :file:`gnat.adc` file located in your current directory, just do:
-
-    ::
-
-       $ gnatmake -f main_prog
-
-  (Use the :switch:`-f` option for ``gnatmake`` to
-  recompile everything
-  with the set of pragmas ``Eliminate`` that you have obtained with
-  ``gnatelim``).
-
-  Be aware that the set of ``Eliminate`` pragmas is specific to each
-  program. It is not recommended to merge sets of ``Eliminate``
-  pragmas created for different programs in one configuration file.
-
-
-  .. _Summary_of_the_gnatelim_Usage_Cycle:
-
-  Summary of the ``gnatelim`` Usage Cycle
-  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-  Here is a quick summary of the steps to be taken in order to reduce
-  the size of your executables with ``gnatelim``. You may use
-  other GNAT options to control the optimization level,
-  to produce the debugging information, to set search path, etc.
-
-  * Create a complete set of :file:`ALI` files (if the program has not been
-    built already)
-
-    ::
-
-        $ gnatmake -c main_prog
-
-  * Generate a list of ``Eliminate`` pragmas in default configuration file
-    :file:`gnat.adc` in the current directory
-
-    ::
-
-        $ gnatelim main_prog >[>] gnat.adc
-
-  * Recompile the application
-
-    ::
-
-        $ gnatmake -f main_prog
-
+  If ``gnatelim`` is called with a project file and with ``-U`` option
+  the generated set of pragmas may contain pragmas for subprograms that
+  does not belong to the closure of the argument main subprogram. These
+  pragmas has no effect when the set of pragmas is used to reduce the size
+  of executable.
 
 
 .. index:: Overflow checks
@@ -3409,19 +3280,18 @@ to use the proper subtypes in object declarations.
 .. index:: MKS_Type type
 
 The simplest way to impose dimensionality checking on a computation is to make
-use of the package ``System.Dim.Mks``,
-which is part of the GNAT library. This
-package defines a floating-point type ``MKS_Type``,
-for which a sequence of
-dimension names are specified, together with their conventional abbreviations.
-The following should be read together with the full specification of the
-package, in file :file:`s-dimmks.ads`.
+use of one of the instantiations of the package ``System.Dim.Generic_Mks``, which
+are part of the GNAT library. This generic package defines a floating-point
+type ``MKS_Type``, for which a sequence of dimension names are specified,
+together with their conventional abbreviations.  The following should be read
+together with the full specification of the package, in file
+:file:`s-digemk.ads`.
 
-  .. index:: s-dimmks.ads file
+  .. index:: s-digemk.ads file
 
   .. code-block:: ada
 
-     type Mks_Type is new Long_Long_Float
+     type Mks_Type is new Float_Type
        with
         Dimension_System => (
           (Unit_Name => Meter,    Unit_Symbol => 'm',   Dim_Symbol => 'L'),
@@ -3465,10 +3335,16 @@ as well as useful multiples of these units:
      day : constant Time   := 60.0 * 24.0 * min;
     ...
 
-Using this package, you can then define a derived unit by
-providing the aspect that
-specifies its dimensions within the MKS system, as well as the string to
-be used for output of a value of that unit:
+There are three instantiations of ``System.Dim.Generic_Mks`` defined in the
+GNAT library:
+
+* ``System.Dim.Float_Mks`` based on ``Float`` defined in :file:`s-diflmk.ads`.
+* ``System.Dim.Long_Mks`` based on ``Long_Float`` defined in :file:`s-dilomk.ads`.
+* ``System.Dim.Mks`` based on ``Long_Long_Float`` defined in :file:`s-dimmks.ads`.
+
+Using one of these packages, you can then define a derived unit by providing
+the aspect that specifies its dimensions within the MKS system, as well as the
+string to be used for output of a value of that unit:
 
   .. code-block:: ada
 
@@ -3513,7 +3389,7 @@ However, incorrect assignments such as:
   .. code-block:: ada
 
        Distance := 5.0;
-       Distance := 5.0 * kg:
+       Distance := 5.0 * kg;
 
 are rejected with the following diagnoses:
 
@@ -3556,7 +3432,7 @@ aspect.
   .. index:: Dimension Vector (for a dimensioned subtype)
   .. index:: Dimension aspect
   .. index:: Dimension_System aspect
-  
+
 The ``Dimension`` aspect of a dimensioned subtype ``S`` defines a mapping
 from the base type's Unit_Names to integer (or, more generally, rational)
 values. This mapping is the *dimension vector* (also referred to as the
@@ -3575,8 +3451,8 @@ means that the unit is not used. For example:
       end;
 
 Here ``DV(Acc)`` = ``DV(Acceleration)`` =
-``(Meter=>1, Kilogram=>0, Second => -2, Ampere=>0, Kelvin=>0, Mole=>0, Candela => 0)``.
-Symbolically, we can express this as ``Meter / Second**2``. 
+``(Meter=>1, Kilogram=>0, Second=>-2, Ampere=>0, Kelvin=>0, Mole=>0, Candela=>0)``.
+Symbolically, we can express this as ``Meter / Second**2``.
 
 The dimension vector of an arithmetic expression is synthesized from the
 dimension vectors of its components, with compile-time dimensionality checks
@@ -3593,7 +3469,7 @@ mathematical definitions for the vector operations that are used:
 * :samp:`DV({op expr})`, where *op* is a unary operator, is :samp:`DV({expr})`
 
 * :samp:`DV({expr1 op expr2})` where *op* is "+" or "-" is :samp:`DV({expr1})`
-  provided that :samp:`DV({expr1})` = :samp:`DV({expr2})`. 
+  provided that :samp:`DV({expr1})` = :samp:`DV({expr2})`.
   If this condition is not met then the construct is illegal.
 
 * :samp:`DV({expr1} * {expr2})` is :samp:`DV({expr1})` + :samp:`DV({expr2})`,
@@ -3611,20 +3487,26 @@ combine a dimensioned and dimensionless value.  Thus an expression such as
 ``Acceleration``.
 
 The dimensionality checks for relationals use the same rules as
-for "+" and "-"; thus
+for "+" and "-", except when comparing to a literal; thus
 
   .. code-block:: ada
 
-        acc > 10.0
+        acc > len
 
 is equivalent to
 
   .. code-block:: ada
 
-       acc-10.0 > 0.0
+       acc-len > 0.0
 
-and is thus illegal. Analogously a conditional expression
-requires the same dimension vector for each branch.  
+and is thus illegal, but
+
+  .. code-block:: ada
+
+        acc > 10.0
+
+is accepted with a warning. Analogously a conditional expression requires the
+same dimension vector for each branch (with no exception for literals).
 
 The dimension vector of a type conversion :samp:`T({expr})` is defined
 as follows, based on the nature of ``T``:
@@ -3648,7 +3530,7 @@ as follows, based on the nature of ``T``:
   Thus, if *expr* is of a dimensioned subtype of ``T``, the conversion may
   be regarded as a "view conversion" that preserves dimensionality.
 
-  This rule makes it possible to write generic code that can be instantiated 
+  This rule makes it possible to write generic code that can be instantiated
   with compatible dimensioned subtypes.  The generic unit will contain
   conversions that will consequently be present in instantiations, but
   conversions to the base type will preserve dimensionality and make it
@@ -3663,10 +3545,10 @@ as follows, based on the nature of ``T``:
 The dimension vector for a type qualification :samp:`T'({expr})` is the same
 as for the type conversion :samp:`T({expr})`.
 
-An assignment statement 
+An assignment statement
 
    .. code-block:: ada
-   
+
          Source := Target;
 
 requires ``DV(Source)`` = ``DV(Target)``, and analogously for parameter
@@ -3716,33 +3598,14 @@ that any use of the stack (for procedure calls or for declaring local
 variables in declare blocks) does not exceed the available stack space.
 If the space is exceeded, then a ``Storage_Error`` exception is raised.
 
-For declared tasks, the stack size is controlled by the size
-given in an applicable ``Storage_Size`` pragma or by the value specified
-at bind time with ``-d`` (:ref:`Switches_for_gnatbind`) or is set to
-the default size as defined in the GNAT runtime otherwise.
+For declared tasks, the default stack size is defined by the GNAT runtime,
+whose size may be modified at bind time through the ``-d`` bind switch
+(:ref:`Switches_for_gnatbind`). Task specific stack sizes may be set using the
+``Storage_Size`` pragma.
 
-.. index:: GNAT_STACK_LIMIT
-
-For the environment task, the stack size depends on
-system defaults and is unknown to the compiler. Stack checking
-may still work correctly if a fixed
-size stack is allocated, but this cannot be guaranteed.
-To ensure that a clean exception is signalled for stack
-overflow, set the environment variable
-:envvar:`GNAT_STACK_LIMIT` to indicate the maximum
-stack area that can be used, as in:
-
-  ::
-
-     $ SET GNAT_STACK_LIMIT 1600
-
-The limit is given in kilobytes, so the above declaration would
-set the stack limit of the environment task to 1.6 megabytes.
-Note that the only purpose of this usage is to limit the amount
-of stack used by the environment task. If it is necessary to
-increase the amount of stack for the environment task, then this
-is an operating systems issue, and must be addressed with the
-appropriate operating systems commands.
+For the environment task, the stack size is determined by the operating system.
+Consequently, to modify the size of the environment task please refer to your
+operating system documentation.
 
 
 .. _Static_Stack_Usage_Analysis:
@@ -3830,11 +3693,20 @@ where:
   is not entirely analyzed, and it's not possible to know exactly how
   much has actually been used.
 
-The environment task stack, e.g., the stack that contains the main unit, is
-only processed when the environment variable GNAT_STACK_LIMIT is set.
+By default the environment task stack, the stack that contains the main unit,
+is not processed. To enable processing of the environment task stack, the
+environment variable GNAT_STACK_LIMIT needs to be set to the maximum size of
+the environment task stack. This amount is given in kilobytes. For example:
+
+  ::
+
+     $ set GNAT_STACK_LIMIT 1600
+
+would specify to the analyzer that the environment task stack has a limit
+of 1.6 megabytes. Any stack usage beyond this will be ignored by the analysis.
 
 The package ``GNAT.Task_Stack_Usage`` provides facilities to get
-stack usage reports at run-time. See its body for the details.
+stack-usage reports at run time. See its body for the details.
 
 
 
@@ -4093,9 +3965,8 @@ execution of this erroneous program:
   ``gnatmem`` makes use of the output created by the special version of
   allocation and deallocation routines that record call information. This allows
   it to obtain accurate dynamic memory usage history at a minimal cost to the
-  execution speed. Note however, that ``gnatmem`` is not supported on all
-  platforms (currently, it is supported on AIX, HP-UX, GNU/Linux, Solaris and
-  Windows).
+  execution speed. Note however, that ``gnatmem`` is only supported on
+  GNU/Linux and Windows.
 
   The ``gnatmem`` command has the form
 

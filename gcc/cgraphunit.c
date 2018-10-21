@@ -1,5 +1,5 @@
 /* Driver of optimization process
-   Copyright (C) 2003-2017 Free Software Foundation, Inc.
+   Copyright (C) 2003-2018 Free Software Foundation, Inc.
    Contributed by Jan Hubicka
 
 This file is part of GCC.
@@ -202,7 +202,6 @@ along with GCC; see the file COPYING3.  If not see
 #include "pass_manager.h"
 #include "tree-nested.h"
 #include "dbgcnt.h"
-#include "tree-chkp.h"
 #include "lto-section-names.h"
 #include "stringpool.h"
 #include "attribs.h"
@@ -620,24 +619,22 @@ cgraph_node::analyze (void)
     {
       cgraph_node *t = cgraph_node::get (thunk.alias);
 
-      create_edge (t, NULL, t->count, CGRAPH_FREQ_BASE);
+      create_edge (t, NULL, t->count);
       callees->can_throw_external = !TREE_NOTHROW (t->decl);
       /* Target code in expand_thunk may need the thunk's target
 	 to be analyzed, so recurse here.  */
-      if (!t->analyzed)
+      if (!t->analyzed && t->definition)
 	t->analyze ();
       if (t->alias)
 	{
 	  t = t->get_alias_target ();
-	  if (!t->analyzed)
+	  if (!t->analyzed && t->definition)
 	    t->analyze ();
 	}
-      if (!expand_thunk (false, false))
-	{
-	  thunk.alias = NULL;
-	  return;
-	}
+      bool ret = expand_thunk (false, false);
       thunk.alias = NULL;
+      if (!ret)
+	return;
     }
   if (alias)
     resolve_alias (cgraph_node::get (alias_target), transparent_alias);
@@ -787,6 +784,12 @@ process_function_and_variable_attributes (cgraph_node *first,
 	  DECL_ATTRIBUTES (decl) = remove_attribute ("weakref",
 						     DECL_ATTRIBUTES (decl));
 	}
+      else if (lookup_attribute ("alias", DECL_ATTRIBUTES (decl))
+	  && node->definition
+	  && !node->alias)
+	warning_at (DECL_SOURCE_LOCATION (node->decl), OPT_Wattributes,
+		    "%<alias%> attribute ignored"
+		    " because function is defined");
 
       if (lookup_attribute ("always_inline", DECL_ATTRIBUTES (decl))
 	  && !DECL_DECLARED_INLINE_P (decl)
@@ -865,9 +868,6 @@ varpool_node::finalize_decl (tree decl)
       || (node->no_reorder
 	  && symtab->state == EXPANSION))
     node->assemble_decl ();
-
-  if (DECL_INITIAL (decl))
-    chkp_register_var_initializer (decl);
 }
 
 /* EDGE is an polymorphic call.  Mark all possible targets as reachable
@@ -932,18 +932,13 @@ walk_polymorphic_call_targets (hash_set<void *> *reachable_call_targets,
 	    }
           if (dump_enabled_p ())
             {
-	      location_t locus = gimple_location_safe (edge->call_stmt);
-	      dump_printf_loc (MSG_OPTIMIZED_LOCATIONS, locus,
+	      dump_printf_loc (MSG_OPTIMIZED_LOCATIONS, edge->call_stmt,
 			       "devirtualizing call in %s to %s\n",
 			       edge->caller->name (), target->name ());
 	    }
 
 	  edge->make_direct (target);
 	  edge->redirect_call_stmt_to_callee ();
-
-	  /* Call to __builtin_unreachable shouldn't be instrumented.  */
-	  if (!targets.length ())
-	    gimple_call_set_with_bounds (edge->call_stmt, false);
 
 	  if (symtab->dump_file)
 	    {
@@ -1296,6 +1291,98 @@ analyze_functions (bool first_time)
   input_location = saved_loc;
 }
 
+/* Check declaration of the type of ALIAS for compatibility with its TARGET
+   (which may be an ifunc resolver) and issue a diagnostic when they are
+   not compatible according to language rules (plus a C++ extension for
+   non-static member functions).  */
+
+static void
+maybe_diag_incompatible_alias (tree alias, tree target)
+{
+  tree altype = TREE_TYPE (alias);
+  tree targtype = TREE_TYPE (target);
+
+  bool ifunc = cgraph_node::get (alias)->ifunc_resolver;
+  tree funcptr = altype;
+
+  if (ifunc)
+    {
+      /* Handle attribute ifunc first.  */
+      if (TREE_CODE (altype) == METHOD_TYPE)
+	{
+	  /* Set FUNCPTR to the type of the alias target.  If the type
+	     is a non-static member function of class C, construct a type
+	     of an ordinary function taking C* as the first argument,
+	     followed by the member function argument list, and use it
+	     instead to check for incompatibility.  This conversion is
+	     not defined by the language but an extension provided by
+	     G++.  */
+
+	  tree rettype = TREE_TYPE (altype);
+	  tree args = TYPE_ARG_TYPES (altype);
+	  altype = build_function_type (rettype, args);
+	  funcptr = altype;
+	}
+
+      targtype = TREE_TYPE (targtype);
+
+      if (POINTER_TYPE_P (targtype))
+	{
+	  targtype = TREE_TYPE (targtype);
+
+	  /* Only issue Wattribute-alias for conversions to void* with
+	     -Wextra.  */
+	  if (VOID_TYPE_P (targtype) && !extra_warnings)
+	    return;
+
+	  /* Proceed to handle incompatible ifunc resolvers below.  */
+	}
+      else
+	{
+	  funcptr = build_pointer_type (funcptr);
+
+	  error_at (DECL_SOURCE_LOCATION (target),
+		    "%<ifunc%> resolver for %qD must return %qT",
+		 alias, funcptr);
+	  inform (DECL_SOURCE_LOCATION (alias),
+		  "resolver indirect function declared here");
+	  return;
+	}
+    }
+
+  if ((!FUNC_OR_METHOD_TYPE_P (targtype)
+       || (prototype_p (altype)
+	   && prototype_p (targtype)
+	   && !types_compatible_p (altype, targtype))))
+    {
+      /* Warn for incompatibilities.  Avoid warning for functions
+	 without a prototype to make it possible to declare aliases
+	 without knowing the exact type, as libstdc++ does.  */
+      if (ifunc)
+	{
+	  funcptr = build_pointer_type (funcptr);
+
+	  auto_diagnostic_group d;
+	  if (warning_at (DECL_SOURCE_LOCATION (target),
+			  OPT_Wattribute_alias,
+			  "%<ifunc%> resolver for %qD should return %qT",
+			  alias, funcptr))
+	    inform (DECL_SOURCE_LOCATION (alias),
+		    "resolver indirect function declared here");
+	}
+      else
+	{
+	  auto_diagnostic_group d;
+	  if (warning_at (DECL_SOURCE_LOCATION (alias),
+			    OPT_Wattribute_alias,
+			    "%qD alias between functions of incompatible "
+			    "types %qT and %qT", alias, altype, targtype))
+	    inform (DECL_SOURCE_LOCATION (target),
+		      "aliased declaration here");
+	}
+    }
+}
+
 /* Translate the ugly representation of aliases as alias pairs into nice
    representation in callgraph.  We don't handle all cases yet,
    unfortunately.  */
@@ -1305,7 +1392,7 @@ handle_alias_pairs (void)
 {
   alias_pair *p;
   unsigned i;
-  
+
   for (i = 0; alias_pairs && alias_pairs->iterate (i, &p);)
     {
       symtab_node *target_node = symtab_node::get_for_asmname (p->target);
@@ -1352,6 +1439,8 @@ handle_alias_pairs (void)
       if (TREE_CODE (p->decl) == FUNCTION_DECL
           && target_node && is_a <cgraph_node *> (target_node))
 	{
+	  maybe_diag_incompatible_alias (p->decl, target_node->decl);
+
 	  cgraph_node *src_node = cgraph_node::get (p->decl);
 	  if (src_node && src_node->definition)
 	    src_node->reset ();
@@ -1366,10 +1455,11 @@ handle_alias_pairs (void)
 	}
       else
 	{
-	  error ("%q+D alias in between function and variable is not supported",
+	  error ("%q+D alias between function and variable is not supported",
 		 p->decl);
-	  warning (0, "%q+D aliased declaration",
-		   target_node->decl);
+	  inform (DECL_SOURCE_LOCATION (target_node->decl),
+		  "aliased declaration here");
+
 	  alias_pairs->unordered_remove (i);
 	}
     }
@@ -1511,32 +1601,28 @@ init_lowered_empty_function (tree decl, bool in_ssa, profile_count count)
 
   /* Create BB for body of the function and connect it properly.  */
   ENTRY_BLOCK_PTR_FOR_FN (cfun)->count = count;
-  ENTRY_BLOCK_PTR_FOR_FN (cfun)->frequency = BB_FREQ_MAX;
   EXIT_BLOCK_PTR_FOR_FN (cfun)->count = count;
-  EXIT_BLOCK_PTR_FOR_FN (cfun)->frequency = BB_FREQ_MAX;
   bb = create_basic_block (NULL, ENTRY_BLOCK_PTR_FOR_FN (cfun));
   bb->count = count;
-  bb->frequency = BB_FREQ_MAX;
   e = make_edge (ENTRY_BLOCK_PTR_FOR_FN (cfun), bb, EDGE_FALLTHRU);
-  e->count = count;
   e->probability = profile_probability::always ();
   e = make_edge (bb, EXIT_BLOCK_PTR_FOR_FN (cfun), 0);
-  e->count = count;
   e->probability = profile_probability::always ();
   add_bb_to_loop (bb, ENTRY_BLOCK_PTR_FOR_FN (cfun)->loop_father);
 
   return bb;
 }
 
-/* Adjust PTR by the constant FIXED_OFFSET, and by the vtable
-   offset indicated by VIRTUAL_OFFSET, if that is
-   non-null. THIS_ADJUSTING is nonzero for a this adjusting thunk and
-   zero for a result adjusting thunk.  */
+/* Adjust PTR by the constant FIXED_OFFSET, by the vtable offset indicated by
+   VIRTUAL_OFFSET, and by the indirect offset indicated by INDIRECT_OFFSET, if
+   it is non-null. THIS_ADJUSTING is nonzero for a this adjusting thunk and zero
+   for a result adjusting thunk.  */
 
 tree
 thunk_adjust (gimple_stmt_iterator * bsi,
 	      tree ptr, bool this_adjusting,
-	      HOST_WIDE_INT fixed_offset, tree virtual_offset)
+	      HOST_WIDE_INT fixed_offset, tree virtual_offset,
+	      HOST_WIDE_INT indirect_offset)
 {
   gassign *stmt;
   tree ret;
@@ -1551,6 +1637,16 @@ thunk_adjust (gimple_stmt_iterator * bsi,
       gsi_insert_after (bsi, stmt, GSI_NEW_STMT);
     }
 
+  if (!vtable_entry_type && (virtual_offset || indirect_offset != 0))
+    {
+      tree vfunc_type = make_node (FUNCTION_TYPE);
+      TREE_TYPE (vfunc_type) = integer_type_node;
+      TYPE_ARG_TYPES (vfunc_type) = NULL_TREE;
+      layout_type (vfunc_type);
+
+      vtable_entry_type = build_pointer_type (vfunc_type);
+    }
+
   /* If there's a virtual offset, look up that value in the vtable and
      adjust the pointer again.  */
   if (virtual_offset)
@@ -1558,16 +1654,6 @@ thunk_adjust (gimple_stmt_iterator * bsi,
       tree vtabletmp;
       tree vtabletmp2;
       tree vtabletmp3;
-
-      if (!vtable_entry_type)
-	{
-	  tree vfunc_type = make_node (FUNCTION_TYPE);
-	  TREE_TYPE (vfunc_type) = integer_type_node;
-	  TYPE_ARG_TYPES (vfunc_type) = NULL_TREE;
-	  layout_type (vfunc_type);
-
-	  vtable_entry_type = build_pointer_type (vfunc_type);
-	}
 
       vtabletmp =
 	create_tmp_reg (build_pointer_type
@@ -1602,6 +1688,41 @@ thunk_adjust (gimple_stmt_iterator * bsi,
 
       /* Adjust the `this' pointer.  */
       ptr = fold_build_pointer_plus_loc (input_location, ptr, vtabletmp3);
+      ptr = force_gimple_operand_gsi (bsi, ptr, true, NULL_TREE, false,
+				      GSI_CONTINUE_LINKING);
+    }
+
+  /* Likewise for an offset that is stored in the object that contains the
+     vtable.  */
+  if (indirect_offset != 0)
+    {
+      tree offset_ptr, offset_tree;
+
+      /* Get the address of the offset.  */
+      offset_ptr
+        = create_tmp_reg (build_pointer_type
+			  (build_pointer_type (vtable_entry_type)),
+			  "offset_ptr");
+      stmt = gimple_build_assign (offset_ptr,
+				  build1 (NOP_EXPR, TREE_TYPE (offset_ptr),
+					  ptr));
+      gsi_insert_after (bsi, stmt, GSI_NEW_STMT);
+
+      stmt = gimple_build_assign
+	     (offset_ptr,
+	      fold_build_pointer_plus_hwi_loc (input_location, offset_ptr,
+					       indirect_offset));
+      gsi_insert_after (bsi, stmt, GSI_NEW_STMT);
+
+      /* Get the offset itself.  */
+      offset_tree = create_tmp_reg (TREE_TYPE (TREE_TYPE (offset_ptr)),
+				    "offset");
+      stmt = gimple_build_assign (offset_tree,
+				  build_simple_mem_ref (offset_ptr));
+      gsi_insert_after (bsi, stmt, GSI_NEW_STMT);
+
+      /* Adjust the `this' pointer.  */
+      ptr = fold_build_pointer_plus_loc (input_location, ptr, offset_tree);
       ptr = force_gimple_operand_gsi (bsi, ptr, true, NULL_TREE, false,
 				      GSI_CONTINUE_LINKING);
     }
@@ -1644,6 +1765,7 @@ cgraph_node::expand_thunk (bool output_asm_thunks, bool force_gimple_thunk)
   bool this_adjusting = thunk.this_adjusting;
   HOST_WIDE_INT fixed_offset = thunk.fixed_offset;
   HOST_WIDE_INT virtual_value = thunk.virtual_value;
+  HOST_WIDE_INT indirect_offset = thunk.indirect_offset;
   tree virtual_offset = NULL;
   tree alias = callees->callee->decl;
   tree thunk_fndecl = decl;
@@ -1654,7 +1776,11 @@ cgraph_node::expand_thunk (bool output_asm_thunks, bool force_gimple_thunk)
   if (thunk.add_pointer_bounds_args)
     return false;
 
-  if (!force_gimple_thunk && this_adjusting
+  if (!force_gimple_thunk
+      && this_adjusting
+      && indirect_offset == 0
+      && !DECL_EXTERNAL (alias)
+      && !DECL_STATIC_CHAIN (alias)
       && targetm.asm_out.can_output_mi_thunk (thunk_fndecl, fixed_offset,
 					      virtual_value, alias))
     {
@@ -1727,7 +1853,6 @@ cgraph_node::expand_thunk (bool output_asm_thunks, bool force_gimple_thunk)
       int i;
       tree resdecl;
       tree restmp = NULL;
-      tree resbnd = NULL;
 
       gcall *call;
       greturn *ret;
@@ -1737,6 +1862,12 @@ cgraph_node::expand_thunk (bool output_asm_thunks, bool force_gimple_thunk)
 	 DECL_ARGUMENTS.  In this case force_gimple_thunk is true.  */
       if (in_lto_p && !force_gimple_thunk)
 	get_untransformed_body ();
+
+      /* We need to force DECL_IGNORED_P when the thunk is created
+	 after early debug was run.  */
+      if (force_gimple_thunk)
+	DECL_IGNORED_P (thunk_fndecl) = 1;
+
       a = DECL_ARGUMENTS (thunk_fndecl);
 
       current_function_decl = thunk_fndecl;
@@ -1745,7 +1876,6 @@ cgraph_node::expand_thunk (bool output_asm_thunks, bool force_gimple_thunk)
       resolve_unique_section (thunk_fndecl, 0,
 			      flag_function_sections);
 
-      DECL_IGNORED_P (thunk_fndecl) = 1;
       bitmap_obstack_initialize (NULL);
 
       if (thunk.virtual_offset_p)
@@ -1758,14 +1888,18 @@ cgraph_node::expand_thunk (bool output_asm_thunks, bool force_gimple_thunk)
 	  resdecl = build_decl (input_location, RESULT_DECL, 0, restype);
 	  DECL_ARTIFICIAL (resdecl) = 1;
 	  DECL_IGNORED_P (resdecl) = 1;
+	  DECL_CONTEXT (resdecl) = thunk_fndecl;
 	  DECL_RESULT (thunk_fndecl) = resdecl;
-          DECL_CONTEXT (DECL_RESULT (thunk_fndecl)) = thunk_fndecl;
 	}
       else
 	resdecl = DECL_RESULT (thunk_fndecl);
 
+      profile_count cfg_count = count;
+      if (!cfg_count.initialized_p ())
+	cfg_count = profile_count::from_gcov_type (BB_FREQ_MAX).guessed_local ();
+
       bb = then_bb = else_bb = return_bb
-	= init_lowered_empty_function (thunk_fndecl, true, count);
+	= init_lowered_empty_function (thunk_fndecl, true, cfg_count);
 
       bsi = gsi_start_bb (bb);
 
@@ -1792,8 +1926,11 @@ cgraph_node::expand_thunk (bool output_asm_thunks, bool force_gimple_thunk)
 		  restmp = resdecl;
 
 		  if (VAR_P (restmp))
-		    add_local_decl (cfun, restmp);
-		  BLOCK_VARS (DECL_INITIAL (current_function_decl)) = restmp;
+		    {
+		      add_local_decl (cfun, restmp);
+		      BLOCK_VARS (DECL_INITIAL (current_function_decl))
+			= restmp;
+		    }
 		}
 	      else
 		restmp = create_tmp_var (restype, "retval");
@@ -1810,7 +1947,7 @@ cgraph_node::expand_thunk (bool output_asm_thunks, bool force_gimple_thunk)
       if (this_adjusting)
 	{
 	  vargs.quick_push (thunk_adjust (&bsi, a, 1, fixed_offset,
-					  virtual_offset));
+					  virtual_offset, indirect_offset));
 	  arg = DECL_CHAIN (a);
 	  i = 1;
 	}
@@ -1835,7 +1972,25 @@ cgraph_node::expand_thunk (bool output_asm_thunks, bool force_gimple_thunk)
       call = gimple_build_call_vec (build_fold_addr_expr_loc (0, alias), vargs);
       callees->call_stmt = call;
       gimple_call_set_from_thunk (call, true);
-      gimple_call_set_with_bounds (call, instrumentation_clone);
+      if (DECL_STATIC_CHAIN (alias))
+	{
+	  tree p = DECL_STRUCT_FUNCTION (alias)->static_chain_decl;
+	  tree type = TREE_TYPE (p);
+	  tree decl = build_decl (DECL_SOURCE_LOCATION (thunk_fndecl),
+				  PARM_DECL, create_tmp_var_name ("CHAIN"),
+				  type);
+	  DECL_ARTIFICIAL (decl) = 1;
+	  DECL_IGNORED_P (decl) = 1;
+	  TREE_USED (decl) = 1;
+	  DECL_CONTEXT (decl) = thunk_fndecl;
+	  DECL_ARG_TYPE (decl) = type;
+	  TREE_READONLY (decl) = 1;
+
+	  struct function *sf = DECL_STRUCT_FUNCTION (thunk_fndecl);
+	  sf->static_chain_decl = decl;
+
+	  gimple_call_set_chain (call, decl);
+	}
 
       /* Return slot optimization is always possible and in fact requred to
          return values with DECL_BY_REFERENCE.  */
@@ -1853,17 +2008,6 @@ cgraph_node::expand_thunk (bool output_asm_thunks, bool force_gimple_thunk)
       gsi_insert_after (&bsi, call, GSI_NEW_STMT);
       if (!alias_is_noreturn)
 	{
-	  if (instrumentation_clone
-	      && !DECL_BY_REFERENCE (resdecl)
-	      && restmp
-	      && BOUNDED_P (restmp))
-	    {
-	      resbnd = chkp_insert_retbnd_call (NULL, restmp, &bsi);
-	      create_edge (get_create (gimple_call_fndecl (gsi_stmt (bsi))),
-			   as_a <gcall *> (gsi_stmt (bsi)),
-			   callees->count, callees->frequency);
-	    }
-
 	  if (restmp && !this_adjusting
 	      && (fixed_offset || virtual_offset))
 	    {
@@ -1878,14 +2022,11 @@ cgraph_node::expand_thunk (bool output_asm_thunks, bool force_gimple_thunk)
 		     adjustment, because that's why we're emitting a
 		     thunk.  */
 		  then_bb = create_basic_block (NULL, bb);
-		  then_bb->count = count - count.apply_scale (1, 16);
-		  then_bb->frequency = BB_FREQ_MAX - BB_FREQ_MAX / 16;
+		  then_bb->count = cfg_count - cfg_count.apply_scale (1, 16);
 		  return_bb = create_basic_block (NULL, then_bb);
-		  return_bb->count = count;
-		  return_bb->frequency = BB_FREQ_MAX;
+		  return_bb->count = cfg_count;
 		  else_bb = create_basic_block (NULL, else_bb);
-		  then_bb->count = count.apply_scale (1, 16);
-		  then_bb->frequency = BB_FREQ_MAX / 16;
+		  else_bb->count = cfg_count.apply_scale (1, 16);
 		  add_bb_to_loop (then_bb, bb->loop_father);
 		  add_bb_to_loop (return_bb, bb->loop_father);
 		  add_bb_to_loop (else_bb, bb->loop_father);
@@ -1898,22 +2039,20 @@ cgraph_node::expand_thunk (bool output_asm_thunks, bool force_gimple_thunk)
 		  e = make_edge (bb, then_bb, EDGE_TRUE_VALUE);
 		  e->probability = profile_probability::guessed_always ()
 					.apply_scale (1, 16);
-		  e->count = count - count.apply_scale (1, 16);
 		  e = make_edge (bb, else_bb, EDGE_FALSE_VALUE);
 		  e->probability = profile_probability::guessed_always ()
 					.apply_scale (1, 16);
-		  e->count = count.apply_scale (1, 16);
 		  make_single_succ_edge (return_bb,
 					 EXIT_BLOCK_PTR_FOR_FN (cfun), 0);
 		  make_single_succ_edge (then_bb, return_bb, EDGE_FALLTHRU);
 		  e = make_edge (else_bb, return_bb, EDGE_FALLTHRU);
 		  e->probability = profile_probability::always ();
-		  e->count = count.apply_scale (1, 16);
 		  bsi = gsi_last_bb (then_bb);
 		}
 
 	      restmp = thunk_adjust (&bsi, restmp, /*this_adjusting=*/0,
-				     fixed_offset, virtual_offset);
+				     fixed_offset, virtual_offset,
+				     indirect_offset);
 	      if (true_label)
 		{
 		  gimple *stmt;
@@ -1932,7 +2071,6 @@ cgraph_node::expand_thunk (bool output_asm_thunks, bool force_gimple_thunk)
 	    ret = gimple_build_return (restmp);
 	  else
 	    ret = gimple_build_return (resdecl);
-	  gimple_return_set_retbnd (ret, resbnd);
 
 	  gsi_insert_after (&bsi, ret, GSI_NEW_STMT);
 	}
@@ -1943,8 +2081,10 @@ cgraph_node::expand_thunk (bool output_asm_thunks, bool force_gimple_thunk)
 	}
 
       cfun->gimple_df->in_ssa_p = true;
+      update_max_bb_count ();
       profile_status_for_fn (cfun)
-        = count.initialized_p () ? PROFILE_READ : PROFILE_GUESSED;
+        = cfg_count.initialized_p () && cfg_count.ipa_p ()
+	  ? PROFILE_READ : PROFILE_GUESSED;
       /* FIXME: C++ FE should stop setting TREE_ASM_WRITTEN on thunks.  */
       TREE_ASM_WRITTEN (thunk_fndecl) = false;
       delete_unreachable_blocks ();
@@ -2064,24 +2204,26 @@ cgraph_node::expand (void)
   /* If requested, warn about function definitions where the function will
      return a value (usually of some struct or union type) which itself will
      take up a lot of stack space.  */
-  if (warn_larger_than && !DECL_EXTERNAL (decl) && TREE_TYPE (decl))
+  if (!DECL_EXTERNAL (decl) && TREE_TYPE (decl))
     {
       tree ret_type = TREE_TYPE (TREE_TYPE (decl));
 
       if (ret_type && TYPE_SIZE_UNIT (ret_type)
 	  && TREE_CODE (TYPE_SIZE_UNIT (ret_type)) == INTEGER_CST
-	  && 0 < compare_tree_int (TYPE_SIZE_UNIT (ret_type),
-				   larger_than_size))
+	  && compare_tree_int (TYPE_SIZE_UNIT (ret_type),
+			       warn_larger_than_size) > 0)
 	{
 	  unsigned int size_as_int
 	    = TREE_INT_CST_LOW (TYPE_SIZE_UNIT (ret_type));
 
 	  if (compare_tree_int (TYPE_SIZE_UNIT (ret_type), size_as_int) == 0)
-	    warning (OPT_Wlarger_than_, "size of return value of %q+D is %u bytes",
+	    warning (OPT_Wlarger_than_,
+		     "size of return value of %q+D is %u bytes",
                      decl, size_as_int);
 	  else
-	    warning (OPT_Wlarger_than_, "size of return value of %q+D is larger than %wd bytes",
-                     decl, larger_than_size);
+	    warning (OPT_Wlarger_than_,
+		     "size of return value of %q+D is larger than %wu bytes",
+	             decl, warn_larger_than_size);
 	}
     }
 
@@ -2367,8 +2509,11 @@ ipa_passes (void)
   if (flag_generate_lto || flag_generate_offload)
     targetm.asm_out.lto_start ();
 
-  if (!in_lto_p)
+  if (!in_lto_p
+      || flag_incremental_link == INCREMENTAL_LINK_LTO)
     {
+      if (!quiet_flag)
+	fprintf (stderr, "Streaming LTO\n");
       if (g->have_offload)
 	{
 	  section_name_prefix = OFFLOAD_SECTION_NAME_PREFIX;
@@ -2387,7 +2532,9 @@ ipa_passes (void)
   if (flag_generate_lto || flag_generate_offload)
     targetm.asm_out.lto_end ();
 
-  if (!flag_ltrans && (in_lto_p || !flag_lto || flag_fat_lto_objects))
+  if (!flag_ltrans
+      && ((in_lto_p && flag_incremental_link != INCREMENTAL_LINK_LTO)
+	  || !flag_lto || flag_fat_lto_objects))
     execute_ipa_pass_list (passes->all_regular_ipa_passes);
   invoke_plugin_callbacks (PLUGIN_ALL_IPA_PASSES_END, NULL);
 
@@ -2413,13 +2560,9 @@ void
 symbol_table::output_weakrefs (void)
 {
   symtab_node *node;
-  cgraph_node *cnode;
   FOR_EACH_SYMBOL (node)
     if (node->alias
         && !TREE_ASM_WRITTEN (node->decl)
-	&& (!(cnode = dyn_cast <cgraph_node *> (node))
-	    || !cnode->instrumented_version
-	    || !TREE_ASM_WRITTEN (cnode->instrumented_version->decl))
 	&& node->weakref)
       {
 	tree target;
@@ -2474,7 +2617,8 @@ symbol_table::compile (void)
 
   /* Do nothing else if any IPA pass found errors or if we are just streaming LTO.  */
   if (seen_error ()
-      || (!in_lto_p && flag_lto && !flag_fat_lto_objects))
+      || ((!in_lto_p || flag_incremental_link == INCREMENTAL_LINK_LTO)
+	  && flag_lto && !flag_fat_lto_objects))
     {
       timevar_pop (TV_CGRAPHOPT);
       return;
@@ -2494,6 +2638,7 @@ symbol_table::compile (void)
   timevar_pop (TV_CGRAPHOPT);
 
   /* Output everything.  */
+  switch_to_section (text_section);
   (*debug_hooks->assembly_start) ();
   if (!quiet_flag)
     fprintf (stderr, "Assembling functions:\n");
@@ -2569,6 +2714,89 @@ symbol_table::compile (void)
     }
 }
 
+/* Earlydebug dump file, flags, and number.  */
+
+static int debuginfo_early_dump_nr;
+static FILE *debuginfo_early_dump_file;
+static dump_flags_t debuginfo_early_dump_flags;
+
+/* Debug dump file, flags, and number.  */
+
+static int debuginfo_dump_nr;
+static FILE *debuginfo_dump_file;
+static dump_flags_t debuginfo_dump_flags;
+
+/* Register the debug and earlydebug dump files.  */
+
+void
+debuginfo_early_init (void)
+{
+  gcc::dump_manager *dumps = g->get_dumps ();
+  debuginfo_early_dump_nr = dumps->dump_register (".earlydebug", "earlydebug",
+						  "earlydebug", DK_tree,
+						  OPTGROUP_NONE,
+						  false);
+  debuginfo_dump_nr = dumps->dump_register (".debug", "debug",
+					     "debug", DK_tree,
+					     OPTGROUP_NONE,
+					     false);
+}
+
+/* Initialize the debug and earlydebug dump files.  */
+
+void
+debuginfo_init (void)
+{
+  gcc::dump_manager *dumps = g->get_dumps ();
+  debuginfo_dump_file = dump_begin (debuginfo_dump_nr, NULL);
+  debuginfo_dump_flags = dumps->get_dump_file_info (debuginfo_dump_nr)->pflags;
+  debuginfo_early_dump_file = dump_begin (debuginfo_early_dump_nr, NULL);
+  debuginfo_early_dump_flags
+    = dumps->get_dump_file_info (debuginfo_early_dump_nr)->pflags;
+}
+
+/* Finalize the debug and earlydebug dump files.  */
+
+void
+debuginfo_fini (void)
+{
+  if (debuginfo_dump_file)
+    dump_end (debuginfo_dump_nr, debuginfo_dump_file);
+  if (debuginfo_early_dump_file)
+    dump_end (debuginfo_early_dump_nr, debuginfo_early_dump_file);
+}
+
+/* Set dump_file to the debug dump file.  */
+
+void
+debuginfo_start (void)
+{
+  set_dump_file (debuginfo_dump_file);
+}
+
+/* Undo setting dump_file to the debug dump file.  */
+
+void
+debuginfo_stop (void)
+{
+  set_dump_file (NULL);
+}
+
+/* Set dump_file to the earlydebug dump file.  */
+
+void
+debuginfo_early_start (void)
+{
+  set_dump_file (debuginfo_early_dump_file);
+}
+
+/* Undo setting dump_file to the earlydebug dump file.  */
+
+void
+debuginfo_early_stop (void)
+{
+  set_dump_file (NULL);
+}
 
 /* Analyze the whole compilation unit once it is parsed completely.  */
 
@@ -2624,7 +2852,9 @@ symbol_table::finalize_compilation_unit (void)
 
       /* Clean up anything that needs cleaning up after initial debug
 	 generation.  */
+      debuginfo_early_start ();
       (*debug_hooks->early_finish) (main_input_filename);
+      debuginfo_early_stop ();
     }
 
   /* Finally drive the pass manager.  */
@@ -2674,7 +2904,7 @@ cgraph_node::create_wrapper (cgraph_node *target)
 
   memset (&thunk, 0, sizeof (cgraph_thunk_info));
   thunk.thunk_p = true;
-  create_edge (target, NULL, count, CGRAPH_FREQ_BASE);
+  create_edge (target, NULL, count);
   callees->can_throw_external = !TREE_NOTHROW (target->decl);
 
   tree arguments = DECL_ARGUMENTS (decl);

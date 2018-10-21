@@ -1,5 +1,5 @@
 /* Loop autoparallelization.
-   Copyright (C) 2006-2017 Free Software Foundation, Inc.
+   Copyright (C) 2006-2018 Free Software Foundation, Inc.
    Contributed by Sebastian Pop <pop@cri.ensmp.fr> 
    Zdenek Dvorak <dvorakz@suse.cz> and Razya Ladelsky <razya@il.ibm.com>.
 
@@ -184,7 +184,7 @@ parloop
 
 /* Minimal number of iterations of a loop that should be executed in each
    thread.  */
-#define MIN_PER_THREAD 100
+#define MIN_PER_THREAD PARAM_VALUE (PARAM_PARLOOPS_MIN_PER_THREAD)
 
 /* Element of the hashtable, representing a
    reduction in the current loop.  */
@@ -2235,6 +2235,25 @@ create_parallel_loop (struct loop *loop, tree loop_fn, tree data,
   calculate_dominance_info (CDI_DOMINATORS);
 }
 
+/* Return number of phis in bb.  If COUNT_VIRTUAL_P is false, don't count the
+   virtual phi.  */
+
+static unsigned int
+num_phis (basic_block bb, bool count_virtual_p)
+{
+  unsigned int nr_phis = 0;
+  gphi_iterator gsi;
+  for (gsi = gsi_start_phis (bb); !gsi_end_p (gsi); gsi_next (&gsi))
+    {
+      if (!count_virtual_p && virtual_operand_p (PHI_RESULT (gsi.phi ())))
+	continue;
+
+      nr_phis++;
+    }
+
+  return nr_phis;
+}
+
 /* Generates code to execute the iterations of LOOP in N_THREADS
    threads in parallel, which can be 0 if that number is to be determined
    later.
@@ -2336,7 +2355,7 @@ gen_parallel_loop (struct loop *loop,
       gcc_checking_assert (n_threads != 0);
       many_iterations_cond =
 	fold_build2 (GE_EXPR, boolean_type_node,
-		     nit, build_int_cst (type, m_p_thread * n_threads));
+		     nit, build_int_cst (type, m_p_thread * n_threads - 1));
 
       many_iterations_cond
 	= fold_build2 (TRUTH_AND_EXPR, boolean_type_node,
@@ -2370,6 +2389,26 @@ gen_parallel_loop (struct loop *loop,
 
   /* Base all the induction variables in LOOP on a single control one.  */
   canonicalize_loop_ivs (loop, &nit, true);
+  if (num_phis (loop->header, false) != reduction_list->elements () + 1)
+    {
+      /* The call to canonicalize_loop_ivs above failed to "base all the
+	 induction variables in LOOP on a single control one".  Do damage
+	 control.  */
+      basic_block preheader = loop_preheader_edge (loop)->src;
+      basic_block cond_bb = single_pred (preheader);
+      gcond *cond = as_a <gcond *> (gsi_stmt (gsi_last_bb (cond_bb)));
+      gimple_cond_make_true (cond);
+      update_stmt (cond);
+      /* We've gotten rid of the duplicate loop created by loop_version, but
+	 we can't undo whatever canonicalize_loop_ivs has done.
+	 TODO: Fix this properly by ensuring that the call to
+	 canonicalize_loop_ivs succeeds.  */
+      if (dump_file
+	  && (dump_flags & TDF_DETAILS))
+	fprintf (dump_file, "canonicalize_loop_ivs failed for loop %d,"
+		 " aborting transformation\n", loop->num);
+      return;
+    }
 
   /* Ensure that the exit condition is the first statement in the loop.
      The common case is that latch of the loop is empty (apart from the
@@ -2531,6 +2570,18 @@ set_reduc_phi_uids (reduction_info **slot, void *data ATTRIBUTE_UNUSED)
   return 1;
 }
 
+/* Return true if the type of reduction performed by STMT_INFO is suitable
+   for this pass.  */
+
+static bool
+valid_reduction_p (stmt_vec_info stmt_info)
+{
+  /* Parallelization would reassociate the operation, which isn't
+     allowed for in-order reductions.  */
+  vect_reduction_type reduc_type = STMT_VINFO_REDUC_TYPE (stmt_info);
+  return reduc_type != FOLD_LEFT_REDUCTION;
+}
+
 /* Detect all reductions in the LOOP, insert them into REDUCTION_LIST.  */
 
 static void
@@ -2541,10 +2592,8 @@ gather_scalar_reductions (loop_p loop, reduction_info_table_type *reduction_list
   auto_vec<gphi *, 4> double_reduc_phis;
   auto_vec<gimple *, 4> double_reduc_stmts;
 
-  if (!stmt_vec_info_vec.exists ())
-    init_stmt_vec_info_vec ();
-
-  simple_loop_info = vect_analyze_loop_form (loop);
+  vec_info_shared shared;
+  simple_loop_info = vect_analyze_loop_form (loop, &shared);
   if (simple_loop_info == NULL)
     goto gather_done;
 
@@ -2561,10 +2610,11 @@ gather_scalar_reductions (loop_p loop, reduction_info_table_type *reduction_list
       if (simple_iv (loop, loop, res, &iv, true))
 	continue;
 
-      gimple *reduc_stmt
-	= vect_force_simple_reduction (simple_loop_info, phi,
+      stmt_vec_info reduc_stmt_info
+	= vect_force_simple_reduction (simple_loop_info,
+				       simple_loop_info->lookup_stmt (phi),
 				       &double_reduc, true);
-      if (!reduc_stmt)
+      if (!reduc_stmt_info || !valid_reduction_p (reduc_stmt_info))
 	continue;
 
       if (double_reduc)
@@ -2573,17 +2623,18 @@ gather_scalar_reductions (loop_p loop, reduction_info_table_type *reduction_list
 	    continue;
 
 	  double_reduc_phis.safe_push (phi);
-	  double_reduc_stmts.safe_push (reduc_stmt);
+	  double_reduc_stmts.safe_push (reduc_stmt_info->stmt);
 	  continue;
 	}
 
-      build_new_reduction (reduction_list, reduc_stmt, phi);
+      build_new_reduction (reduction_list, reduc_stmt_info->stmt, phi);
     }
   delete simple_loop_info;
 
   if (!double_reduc_phis.is_empty ())
     {
-      simple_loop_info = vect_analyze_loop_form (loop->inner);
+      vec_info_shared shared;
+      simple_loop_info = vect_analyze_loop_form (loop->inner, &shared);
       if (simple_loop_info)
 	{
 	  gphi *phi;
@@ -2606,11 +2657,15 @@ gather_scalar_reductions (loop_p loop, reduction_info_table_type *reduction_list
 			     &iv, true))
 		continue;
 
-	      gimple *inner_reduc_stmt
-		= vect_force_simple_reduction (simple_loop_info, inner_phi,
+	      stmt_vec_info inner_phi_info
+		= simple_loop_info->lookup_stmt (inner_phi);
+	      stmt_vec_info inner_reduc_stmt_info
+		= vect_force_simple_reduction (simple_loop_info,
+					       inner_phi_info,
 					       &double_reduc, true);
 	      gcc_assert (!double_reduc);
-	      if (inner_reduc_stmt == NULL)
+	      if (!inner_reduc_stmt_info
+		  || !valid_reduction_p (inner_reduc_stmt_info))
 		continue;
 
 	      build_new_reduction (reduction_list, double_reduc_stmts[i], phi);
@@ -2620,14 +2675,11 @@ gather_scalar_reductions (loop_p loop, reduction_info_table_type *reduction_list
     }
 
  gather_done:
-  /* Release the claim on gimple_uid.  */
-  free_stmt_vec_info_vec ();
-
   if (reduction_list->elements () == 0)
     return;
 
   /* As gimple_uid is used by the vectorizer in between vect_analyze_loop_form
-     and free_stmt_vec_info_vec, we can set gimple_uid of reduc_phi stmts only
+     and delete simple_loop_info, we can set gimple_uid of reduc_phi stmts only
      now.  */
   basic_block bb;
   FOR_EACH_BB_FN (bb, cfun)
@@ -3230,7 +3282,6 @@ parallelize_loops (bool oacc_kernels_p)
   struct tree_niter_desc niter_desc;
   struct obstack parloop_obstack;
   HOST_WIDE_INT estimated;
-  source_location loop_loc;
 
   /* Do not parallelize loops in the functions created by parallelization.  */
   if (!oacc_kernels_p
@@ -3299,15 +3350,6 @@ parallelize_loops (bool oacc_kernels_p)
 	  fprintf (dump_file, "loop %d is innermost\n",loop->num);
       }
 
-      /* If we use autopar in graphite pass, we use its marked dependency
-      checking results.  */
-      if (flag_loop_parallelize_all && !loop->can_be_parallel)
-      {
-        if (dump_file && (dump_flags & TDF_DETAILS))
-	   fprintf (dump_file, "loop is not parallel according to graphite\n");
-	continue;
-      }
-
       if (!single_dom_exit (loop))
       {
 
@@ -3325,15 +3367,17 @@ parallelize_loops (bool oacc_kernels_p)
 	  || loop_has_vector_phi_nodes (loop))
 	continue;
 
-      estimated = estimated_stmt_executions_int (loop);
+      estimated = estimated_loop_iterations_int (loop);
       if (estimated == -1)
-	estimated = likely_max_stmt_executions_int (loop);
+	estimated = get_likely_max_loop_iterations_int (loop);
       /* FIXME: Bypass this check as graphite doesn't update the
 	 count and frequency correctly now.  */
       if (!flag_loop_parallelize_all
 	  && !oacc_kernels_p
 	  && ((estimated != -1
-	       && estimated <= (HOST_WIDE_INT) n_threads * MIN_PER_THREAD)
+	       && (estimated
+		   < ((HOST_WIDE_INT) n_threads
+		      * (loop->inner ? 2 : MIN_PER_THREAD) - 1)))
 	      /* Do not bother with loops in cold areas.  */
 	      || optimize_loop_nest_for_size_p (loop)))
 	continue;
@@ -3347,7 +3391,7 @@ parallelize_loops (bool oacc_kernels_p)
       if (loop_has_phi_with_address_arg (loop))
 	continue;
 
-      if (!flag_loop_parallelize_all
+      if (!loop->can_be_parallel
 	  && !loop_parallel_p (loop, &parloop_obstack))
 	continue;
 
@@ -3362,7 +3406,7 @@ parallelize_loops (bool oacc_kernels_p)
       changed = true;
       skip_loop = loop->inner;
 
-      loop_loc = find_loop_location (loop);
+      dump_user_location_t loop_loc = find_loop_location (loop);
       if (loop->inner)
 	dump_printf_loc (MSG_OPTIMIZED_LOCATIONS, loop_loc,
 			 "parallelizing outer loop %d\n", loop->num);

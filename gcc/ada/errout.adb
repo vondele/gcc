@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2017, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2018, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -307,7 +307,7 @@ package body Errout is
 
    procedure Error_Msg (Msg : String; Flag_Location : Source_Ptr) is
    begin
-      Error_Msg (Msg, Flag_Location, Empty);
+      Error_Msg (Msg, Flag_Location, Current_Node);
    end Error_Msg;
 
    procedure Error_Msg
@@ -1813,7 +1813,7 @@ package body Errout is
          --  the Main_Source line is unknown (this happens in error situations,
          --  e.g. when integrated preprocessing fails).
 
-         if Main_Source_File /= No_Source_File then
+         if Main_Source_File > No_Source_File then
             Write_Str (" ");
             Write_Int (Num_Source_Lines (Main_Source_File));
 
@@ -1938,7 +1938,7 @@ package body Errout is
       --  Source_Reference. This ensures outputting the proper name of
       --  the source file in this situation.
 
-      if Main_Source_File = No_Source_File
+      if Main_Source_File <= No_Source_File
         or else Num_SRef_Pragmas (Main_Source_File) /= 0
       then
          Current_Error_Source_File := No_Source_File;
@@ -2045,7 +2045,7 @@ package body Errout is
 
                   --  Only write the header if Sfile is known
 
-                  if Sfile /= No_Source_File then
+                  if Sfile > No_Source_File then
                      Write_Header (Sfile);
                      Write_Eol;
                   end if;
@@ -2066,7 +2066,7 @@ package body Errout is
                   --  Only output the listing if Sfile is known, to avoid
                   --  crashing the compiler.
 
-                  if Sfile /= No_Source_File then
+                  if Sfile > No_Source_File then
                      for N in 1 .. Last_Source_Line (Sfile) loop
                         while E /= No_Error_Msg
                           and then Errors.Table (E).Deleted
@@ -2141,7 +2141,7 @@ package body Errout is
 
          --  Output the header only when Main_Source_File is known
 
-         if Main_Source_File /= No_Source_File then
+         if Main_Source_File > No_Source_File then
             Write_Header (Main_Source_File);
          end if;
 
@@ -2387,7 +2387,7 @@ package body Errout is
          end loop;
 
          if Nkind (N) = N_Raise_Constraint_Error
-           and then Original_Node (N) /= N
+           and then Is_Rewrite_Substitution (N)
            and then No (Condition (N))
          then
             --  Warnings may have been posted on subexpressions of the original
@@ -3256,37 +3256,6 @@ package body Errout is
 
       if Debug_Flag_OO then
          return False;
-
-      --  Processing for "atomic access cannot be guaranteed"
-
-      elsif Msg = "atomic access to & cannot be guaranteed" then
-
-         --  When an atomic object refers to a non-atomic type in the same
-         --  scope, we implicitly make the type atomic. In the non-error case
-         --  this is surely safe (and in fact prevents an error from occurring
-         --  if the type is not atomic by default). But if the object cannot be
-         --  made atomic, then we introduce an extra junk message by this
-         --  manipulation, which we get rid of here.
-
-         --  We identify this case by the fact that it references a type for
-         --  which Is_Atomic is set, but there is no Atomic pragma setting it.
-
-         if Is_Type (E)
-           and then Is_Atomic (E)
-           and then No (Get_Rep_Pragma (E, Name_Atomic))
-         then
-            return True;
-         end if;
-
-      --  Similar processing for "volatile full access cannot be guaranteed"
-
-      elsif Msg = "volatile full access to & cannot be guaranteed" then
-         if Is_Type (E)
-           and then Is_Volatile_Full_Access (E)
-           and then No (Get_Rep_Pragma (E, Name_Volatile_Full_Access))
-         then
-            return True;
-         end if;
 
       --  Processing for "Size too small" messages
 

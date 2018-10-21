@@ -1,5 +1,5 @@
 /* Definitions of target machine for GNU compiler, for DEC Alpha.
-   Copyright (C) 1992-2017 Free Software Foundation, Inc.
+   Copyright (C) 1992-2018 Free Software Foundation, Inc.
    Contributed by Richard Kenner (kenner@vlsi1.ultra.nyu.edu)
 
 This file is part of GCC.
@@ -289,7 +289,6 @@ extern enum alpha_fp_trap_mode alpha_fptm;
 /* ??? Only if block-move stuff knows about different source/destination
    alignment.  */
 #if 0
-#define CONSTANT_ALIGNMENT(EXP, ALIGN) MAX ((ALIGN), BITS_PER_WORD)
 #define DATA_ALIGNMENT(EXP, ALIGN) MAX ((ALIGN), BITS_PER_WORD)
 #endif
 
@@ -494,13 +493,6 @@ enum reg_class {
    goes at a more negative offset in the frame.  */
 /* #define FRAME_GROWS_DOWNWARD 0 */
 
-/* Offset within stack frame to start allocating local variables at.
-   If FRAME_GROWS_DOWNWARD, this is the offset to the END of the
-   first local allocated.  Otherwise, it is the offset to the BEGINNING
-   of the first local allocated.  */
-
-#define STARTING_FRAME_OFFSET 0
-
 /* If we generate an insn to push BYTES bytes,
    this says how many the stack pointer really advances by.
    On Alpha, don't define this because there are no push insns.  */
@@ -686,7 +678,7 @@ enum reg_class {
 
 #define CONSTANT_ADDRESS_P(X)   \
   (CONST_INT_P (X)		\
-   && (unsigned HOST_WIDE_INT) (INTVAL (X) + 0x8000) < 0x10000)
+   && (UINTVAL (X) + 0x8000) < 0x10000)
 
 /* The macros REG_OK_FOR..._P assume that the arg is a REG rtx
    and check its validity for a certain class.
@@ -929,8 +921,5 @@ extern long alpha_auto_offset;
 
 /* By default, turn on GDB extensions.  */
 #define DEFAULT_GDB_EXTENSIONS 1
-
-/* The system headers under Alpha systems are generally C++-aware.  */
-#define NO_IMPLICIT_EXTERN_C
 
 #define TARGET_SUPPORTS_WIDE_INT 1

@@ -1,7 +1,7 @@
 /* Detect paths through the CFG which can never be executed in a conforming
    program and isolate them.
 
-   Copyright (C) 2013-2017 Free Software Foundation, Inc.
+   Copyright (C) 2013-2018 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -138,6 +138,7 @@ isolate_path (basic_block bb, basic_block duplicate,
   edge_iterator ei;
   edge e2;
   bool impossible = true;
+  profile_count count = e->count ();
 
   for (si = gsi_start_bb (bb); gsi_stmt (si) != stmt; gsi_next (&si))
     if (stmt_can_terminate_bb_p (gsi_stmt (si)))
@@ -154,12 +155,12 @@ isolate_path (basic_block bb, basic_block duplicate,
   if (!duplicate)
     {
       duplicate = duplicate_block (bb, NULL, NULL);
-      bb->frequency = 0;
-      bb->count = profile_count::zero ();
+      duplicate->count = profile_count::zero ();
       if (!ret_zero)
 	for (ei = ei_start (duplicate->succs); (e2 = ei_safe_edge (ei)); )
 	  remove_edge (e2);
     }
+  bb->count -= count;
 
   /* Complete the isolation step by redirecting E to reach DUPLICATE.  */
   e2 = redirect_edge_and_branch (e, duplicate);
@@ -168,8 +169,7 @@ isolate_path (basic_block bb, basic_block duplicate,
       flush_pending_stmts (e2);
 
       /* Update profile only when redirection is really processed.  */
-      bb->frequency += EDGE_FREQUENCY (e);
-      bb->count += e->count;
+      bb->count += e->count ();
     }
 
   /* There may be more than one statement in DUPLICATE which exhibits
@@ -421,12 +421,15 @@ find_implicit_erroneous_behavior (void)
 			  if (gimple_return_retval (return_stmt) != lhs)
 			    continue;
 
-			  if (warning_at (gimple_location (use_stmt),
-					  OPT_Wreturn_local_addr,
-					  "function may return address "
-					  "of local variable"))
-			    inform (DECL_SOURCE_LOCATION(valbase),
-				    "declared here");
+			  {
+			    auto_diagnostic_group d;
+			    if (warning_at (gimple_location (use_stmt),
+					      OPT_Wreturn_local_addr,
+					      "function may return address "
+					      "of local variable"))
+			      inform (DECL_SOURCE_LOCATION(valbase),
+					"declared here");
+			  }
 
 			  if (gimple_bb (use_stmt) == bb)
 			    {
@@ -543,10 +546,13 @@ find_explicit_erroneous_behavior (void)
 		      else
 			msg = N_("function may return address of "
 				 "local variable");
-
-		      if (warning_at (gimple_location (stmt),
-				      OPT_Wreturn_local_addr, msg))
-			inform (DECL_SOURCE_LOCATION(valbase), "declared here");
+		      {
+			auto_diagnostic_group d;
+			if (warning_at (gimple_location (stmt),
+					  OPT_Wreturn_local_addr, msg))
+			  inform (DECL_SOURCE_LOCATION(valbase),
+				  "declared here");
+		      }
 		      tree zero = build_zero_cst (TREE_TYPE (val));
 		      gimple_return_set_retval (return_stmt, zero);
 		      update_stmt (stmt);

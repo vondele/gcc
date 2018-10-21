@@ -27,6 +27,13 @@ var iscgo bool
 // The extra M must be created before any C/C++ code calls cgocallback.
 var cgoHasExtraM bool
 
+// cgoAlwaysFalse is a boolean value that is always false.
+// The cgo-generated code says if cgoAlwaysFalse { cgoUse(p) }.
+// The compiler cannot see that cgoAlwaysFalse is always false,
+// so it emits the test and keeps the call, giving the desired
+// escape analysis result. The test is cheaper than the call.
+var cgoAlwaysFalse bool
+
 // Cgocall prepares to call from code written in Go to code written in
 // C/C++. This takes the current goroutine out of the Go scheduler, as
 // though it were making a system call. Otherwise the program can
@@ -37,12 +44,11 @@ var cgoHasExtraM bool
 //     defer syscall.Cgocalldone()
 //     cfunction()
 func Cgocall() {
-	lockOSThread()
 	mp := getg().m
 	mp.ncgocall++
 	mp.ncgo++
+	entersyscall()
 	mp.incgo = true
-	entersyscall(0)
 }
 
 // CgocallDone prepares to return to Go code from C/C++ code.
@@ -57,10 +63,8 @@ func CgocallDone() {
 	// If we are invoked because the C function called _cgo_panic,
 	// then _cgo_panic will already have exited syscall mode.
 	if readgstatus(gp)&^_Gscan == _Gsyscall {
-		exitsyscall(0)
+		exitsyscall()
 	}
-
-	unlockOSThread()
 }
 
 // CgocallBack is used when calling from C/C++ code into Go code.
@@ -78,7 +82,9 @@ func CgocallBack() {
 		mp.dropextram = true
 	}
 
-	exitsyscall(0)
+	lockOSThread()
+
+	exitsyscall()
 	gp.m.incgo = false
 
 	if gp.m.ncgo == 0 {
@@ -100,6 +106,8 @@ func CgocallBack() {
 // CgocallBackDone prepares to return to C/C++ code that has called
 // into Go code.
 func CgocallBackDone() {
+	unlockOSThread()
+
 	// If we are the top level Go function called from C/C++, then
 	// we need to release the m. But don't release it if we are
 	// panicing; since this is the top level, we are going to
@@ -126,7 +134,7 @@ func CgocallBackDone() {
 	}
 
 	gp.m.incgo = true
-	entersyscall(0)
+	entersyscall()
 
 	if drop {
 		mp.dropextram = false
@@ -136,7 +144,7 @@ func CgocallBackDone() {
 
 // _cgo_panic may be called by SWIG code to panic.
 func _cgo_panic(p *byte) {
-	exitsyscall(0)
+	exitsyscall()
 	panic(gostringnocopy(p))
 }
 

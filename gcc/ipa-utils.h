@@ -1,5 +1,5 @@
 /* Utilities for ipa analysis.
-   Copyright (C) 2004-2017 Free Software Foundation, Inc.
+   Copyright (C) 2004-2018 Free Software Foundation, Inc.
    Contributed by Kenneth Zadeck <zadeck@naturalbridge.com>
 
 This file is part of GCC.
@@ -55,6 +55,7 @@ bool ipa_propagate_frequency (struct cgraph_node *node);
 struct odr_type_d;
 typedef odr_type_d *odr_type;
 void build_type_inheritance_graph (void);
+void rebuild_type_inheritance_graph (void);
 void update_type_inheritance_graph (void);
 vec <cgraph_node *>
 possible_polymorphic_call_targets (tree, HOST_WIDE_INT,
@@ -178,22 +179,24 @@ polymorphic_type_binfo_p (const_tree binfo)
 inline bool
 type_with_linkage_p (const_tree t)
 {
-  if (!TYPE_NAME (t) || TREE_CODE (TYPE_NAME (t)) != TYPE_DECL
-      || !TYPE_STUB_DECL (t))
+  if (!TYPE_NAME (t) || TREE_CODE (TYPE_NAME (t)) != TYPE_DECL)
     return false;
-  /* In LTO do not get confused by non-C++ produced types or types built
-     with -fno-lto-odr-type-merigng.  */
-  if (in_lto_p)
-    {
-      /* To support -fno-lto-odr-type-merigng recognize types with vtables
-         to have linkage.  */
-      if (RECORD_OR_UNION_TYPE_P (t)
-	  && TYPE_BINFO (t) && BINFO_VTABLE (TYPE_BINFO (t)))
-        return true;
-      /* With -flto-odr-type-merging C++ FE specify mangled names
-	 for all types with the linkage.  */
-      return DECL_ASSEMBLER_NAME_SET_P (TYPE_NAME (t));
-    }
+
+  /* To support -fno-lto-odr-type-merigng recognize types with vtables
+     to have linkage.  */
+  if (RECORD_OR_UNION_TYPE_P (t)
+      && TYPE_BINFO (t) && BINFO_VTABLE (TYPE_BINFO (t)))
+    return true;
+
+  /* After free_lang_data was run and -flto-odr-type-merging we can recongize
+     types with linkage by presence of mangled name.  */
+  if (DECL_ASSEMBLER_NAME_SET_P (TYPE_NAME (t)))
+    return true;
+
+  /* If free lang data was not run check if indeed the type looks like C++
+     type with linkage.  */
+  if (in_lto_p || !TYPE_STUB_DECL (t))
+    return false;
 
   if (!RECORD_OR_UNION_TYPE_P (t) && TREE_CODE (t) != ENUMERAL_TYPE)
     return false;
@@ -213,18 +216,16 @@ type_in_anonymous_namespace_p (const_tree t)
 {
   gcc_checking_assert (type_with_linkage_p (t));
 
-  if (!TREE_PUBLIC (TYPE_STUB_DECL (t)))
-    {
-      /* C++ FE uses magic <anon> as assembler names of anonymous types.
- 	 verify that this match with type_in_anonymous_namespace_p.  */
-      gcc_checking_assert (!in_lto_p || !DECL_ASSEMBLER_NAME_SET_P (t)
-			   || !strcmp
-				 ("<anon>",
-				  IDENTIFIER_POINTER
-				     (DECL_ASSEMBLER_NAME (TYPE_NAME (t)))));
-      return true;
-    }
-  return false;
+  /* free_lang_data clears TYPE_STUB_DECL but sets assembler name to
+     "<anon>"  */
+  if (DECL_ASSEMBLER_NAME_SET_P (TYPE_NAME (t)))
+    return !strcmp ("<anon>",
+		    IDENTIFIER_POINTER
+		    (DECL_ASSEMBLER_NAME (TYPE_NAME (t))));
+  else if (!TYPE_STUB_DECL (t))
+    return false;
+  else
+    return !TREE_PUBLIC (TYPE_STUB_DECL (t));
 }
 
 /* Return true of T is type with One Definition Rule info attached. 
@@ -245,14 +246,13 @@ odr_type_p (const_tree t)
   if (type_in_anonymous_namespace_p (t))
     return true;
 
-  if (TYPE_NAME (t) && TREE_CODE (TYPE_NAME (t)) == TYPE_DECL
-      && DECL_ASSEMBLER_NAME_SET_P (TYPE_NAME (t)))
+  if (TYPE_NAME (t) && DECL_ASSEMBLER_NAME_SET_P (TYPE_NAME (t)))
     {
       /* C++ FE uses magic <anon> as assembler names of anonymous types.
  	 verify that this match with type_in_anonymous_namespace_p.  */
       gcc_checking_assert (strcmp ("<anon>",
-				      IDENTIFIER_POINTER
-					(DECL_ASSEMBLER_NAME (TYPE_NAME (t)))));
+				   IDENTIFIER_POINTER
+				   (DECL_ASSEMBLER_NAME (TYPE_NAME (t)))));
       return true;
     }
   return false;

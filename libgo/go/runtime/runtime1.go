@@ -111,10 +111,6 @@ var test_z64, test_x64 uint64
 func testAtomic64() {
 	test_z64 = 42
 	test_x64 = 0
-	prefetcht0(uintptr(unsafe.Pointer(&test_z64)))
-	prefetcht1(uintptr(unsafe.Pointer(&test_z64)))
-	prefetcht2(uintptr(unsafe.Pointer(&test_z64)))
-	prefetchnta(uintptr(unsafe.Pointer(&test_z64)))
 	if atomic.Cas64(&test_z64, test_x64, 1) {
 		throw("cas64 failed")
 	}
@@ -330,20 +326,21 @@ type dbgVar struct {
 // existing int var for that value, which may
 // already have an initial value.
 var debug struct {
-	allocfreetrace   int32
-	cgocheck         int32
-	efence           int32
-	gccheckmark      int32
-	gcpacertrace     int32
-	gcshrinkstackoff int32
-	gcrescanstacks   int32
-	gcstoptheworld   int32
-	gctrace          int32
-	invalidptr       int32
-	sbrk             int32
-	scavenge         int32
-	scheddetail      int32
-	schedtrace       int32
+	allocfreetrace     int32
+	cgocheck           int32
+	efence             int32
+	gccheckmark        int32
+	gcpacertrace       int32
+	gcshrinkstackoff   int32
+	gcrescanstacks     int32
+	gcstoptheworld     int32
+	gctrace            int32
+	invalidptr         int32
+	sbrk               int32
+	scavenge           int32
+	scheddetail        int32
+	schedtrace         int32
+	tracebackancestors int32
 }
 
 var dbgvars = []dbgVar{
@@ -361,6 +358,7 @@ var dbgvars = []dbgVar{
 	{"scavenge", &debug.scavenge},
 	{"scheddetail", &debug.scheddetail},
 	{"schedtrace", &debug.schedtrace},
+	{"tracebackancestors", &debug.tracebackancestors},
 }
 
 func parsedebugvars() {
@@ -413,13 +411,6 @@ func parsedebugvars() {
 
 	setTraceback(gogetenv("GOTRACEBACK"))
 	traceback_env = traceback_cache
-
-	// For cgocheck > 1, we turn on the write barrier at all times
-	// and check all pointer writes.
-	if debug.cgocheck > 1 {
-		writeBarrier.cgo = true
-		writeBarrier.enabled = true
-	}
 }
 
 //go:linkname setTraceback runtime_debug.SetTraceback

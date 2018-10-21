@@ -563,29 +563,25 @@ class Type
   verify()
   { return this->do_verify(); }
 
-  // Return true if two types are identical.  If ERRORS_ARE_IDENTICAL,
-  // returns that an erroneous type is identical to any other type;
-  // this is used to avoid cascading errors.  If this returns false,
+  // Bit flags to pass to are_identical and friends.
+
+  // Treat error types as their own distinct type.  Sometimes we
+  // ignore error types--treat them as identical to every other
+  // type--to avoid cascading errors.
+  static const int COMPARE_ERRORS = 1;
+
+  // Compare struct field tags when comparing structs.  We ignore
+  // struct field tags for purposes of type conversion.
+  static const int COMPARE_TAGS = 2;
+
+  // Compare aliases: treat an alias to T as distinct from T.
+  static const int COMPARE_ALIASES = 4;
+
+  // Return true if two types are identical.  If this returns false,
   // and REASON is not NULL, it may set *REASON.
   static bool
-  are_identical(const Type* lhs, const Type* rhs, bool errors_are_identical,
+  are_identical(const Type* lhs, const Type* rhs, int flags,
 		std::string* reason);
-
-  // An argument to are_identical_cmp_tags, indicating whether or not
-  // to compare struct field tags.
-  enum Cmp_tags {
-    COMPARE_TAGS,
-    IGNORE_TAGS
-  };
-
-  // Return true if two types are identical.  This is like the
-  // are_identical function, but also takes a CMP_TAGS argument
-  // indicating whether to compare struct tags.  Otherwise the
-  // parameters are as for are_identical.
-  static bool
-  are_identical_cmp_tags(const Type* lhs, const Type* rhs,
-			 Cmp_tags, bool errors_are_identical,
-			 std::string* reason);
 
   // Return true if two types are compatible for use in a binary
   // operation, other than a shift, comparison, or channel send.  This
@@ -648,7 +644,7 @@ class Type
   // Types which are equivalent according to are_identical will have
   // the same hash code.
   unsigned int
-  hash_for_method(Gogo*) const;
+  hash_for_method(Gogo*, int) const;
 
   // Return the type classification.
   Type_classification
@@ -675,6 +671,15 @@ class Type
 
   const Type*
   forwarded() const;
+
+  // Return the type skipping any alias definitions and any defined
+  // forward declarations.  This is like forwarded, but also
+  // recursively expands alias definitions to the aliased type.
+  Type*
+  unalias();
+
+  const Type*
+  unalias() const;
 
   // Return true if this is a basic type: a type which is not composed
   // of other types, and is not void.
@@ -907,6 +912,15 @@ class Type
   is_unsafe_pointer_type() const
   { return this->points_to() != NULL && this->points_to()->is_void_type(); }
 
+  // Return a version of this type with any expressions copied, but
+  // only if copying the expressions will affect the size of the type.
+  // If there are no such expressions in the type (expressions can
+  // only occur in array types), just return the same type.  If any
+  // expressions can not affect the size of the type, just return the
+  // same type.
+  Type*
+  copy_expressions();
+
   // Look for field or method NAME for TYPE.  Return an expression for
   // it, bound to EXPR.
   static Expression*
@@ -1064,7 +1078,7 @@ class Type
   { return true; }
 
   virtual unsigned int
-  do_hash_for_method(Gogo*) const;
+  do_hash_for_method(Gogo*, int) const;
 
   virtual Btype*
   do_get_backend(Gogo*) = 0;
@@ -1212,11 +1226,6 @@ class Type
   // Build the GC symbol for this type.
   void
   make_gc_symbol_var(Gogo*);
-
-  // Return the name of the type descriptor variable.  If NAME is not
-  // NULL, it is the name to use.
-  std::string
-  type_descriptor_var_name(Gogo*, Named_type* name);
 
   // Return true if the type descriptor for this type should be
   // defined in some other package.  If NAME is not NULL, it is the
@@ -1368,14 +1377,18 @@ class Type
   bool in_heap_;
 };
 
-// Type hash table operations.
+// Type hash table operations, treating aliases as identical to the
+// types that they alias.
 
 class Type_hash_identical
 {
  public:
   unsigned int
   operator()(const Type* type) const
-  { return type->hash_for_method(NULL); }
+  {
+    return type->hash_for_method(NULL,
+				 Type::COMPARE_ERRORS | Type::COMPARE_TAGS);
+  }
 };
 
 class Type_identical
@@ -1383,7 +1396,11 @@ class Type_identical
  public:
   bool
   operator()(const Type* t1, const Type* t2) const
-  { return Type::are_identical(t1, t2, false, NULL); }
+  {
+    return Type::are_identical(t1, t2,
+			       Type::COMPARE_ERRORS | Type::COMPARE_TAGS,
+			       NULL);
+  }
 };
 
 // An identifier with a type.
@@ -1485,7 +1502,7 @@ class Typed_identifier_list
 
   // Traverse types.
   int
-  traverse(Traverse*);
+  traverse(Traverse*) const;
 
   // Return the first and last elements.
   Typed_identifier&
@@ -1558,6 +1575,92 @@ class Typed_identifier_list
   std::vector<Typed_identifier> entries_;
 };
 
+// A type used to indicate a parsing error.  This exists to simplify
+// later error detection.
+
+class Error_type : public Type
+{
+ public:
+  Error_type()
+    : Type(TYPE_ERROR)
+  { }
+
+ protected:
+  bool
+  do_compare_is_identity(Gogo*)
+  { return false; }
+
+  Btype*
+  do_get_backend(Gogo* gogo);
+
+  Expression*
+  do_type_descriptor(Gogo*, Named_type*);
+
+  void
+  do_reflection(Gogo*, std::string*) const;
+
+  void
+  do_mangled_name(Gogo*, std::string* ret) const;
+};
+
+// The void type.
+
+class Void_type : public Type
+{
+ public:
+  Void_type()
+    : Type(TYPE_VOID)
+  { }
+
+ protected:
+  bool
+  do_compare_is_identity(Gogo*)
+  { return false; }
+
+  Btype*
+  do_get_backend(Gogo* gogo);
+
+  Expression*
+  do_type_descriptor(Gogo*, Named_type*)
+  { go_unreachable(); }
+
+  void
+  do_reflection(Gogo*, std::string*) const
+  { }
+
+  void
+  do_mangled_name(Gogo*, std::string* ret) const;
+};
+
+// The boolean type.
+
+class Boolean_type : public Type
+{
+ public:
+  Boolean_type()
+    : Type(TYPE_BOOLEAN)
+  { }
+
+ protected:
+  bool
+  do_compare_is_identity(Gogo*)
+  { return true; }
+
+  Btype*
+  do_get_backend(Gogo* gogo);
+
+  Expression*
+  do_type_descriptor(Gogo*, Named_type* name);
+
+  // We should not be asked for the reflection string of a basic type.
+  void
+  do_reflection(Gogo*, std::string* ret) const
+  { ret->append("bool"); }
+
+  void
+  do_mangled_name(Gogo*, std::string* ret) const;
+};
+
 // The type of an integer.
 
 class Integer_type : public Type
@@ -1625,7 +1728,7 @@ protected:
   { return true; }
 
   unsigned int
-  do_hash_for_method(Gogo*) const;
+  do_hash_for_method(Gogo*, int) const;
 
   Btype*
   do_get_backend(Gogo*);
@@ -1711,7 +1814,7 @@ class Float_type : public Type
   { return true; }
 
   unsigned int
-  do_hash_for_method(Gogo*) const;
+  do_hash_for_method(Gogo*, int) const;
 
   Btype*
   do_get_backend(Gogo*);
@@ -1789,7 +1892,7 @@ class Complex_type : public Type
   { return true; }
 
   unsigned int
-  do_hash_for_method(Gogo*) const;
+  do_hash_for_method(Gogo*, int) const;
 
   Btype*
   do_get_backend(Gogo*);
@@ -1937,8 +2040,8 @@ class Function_type : public Type
 
   // Whether this type is the same as T.
   bool
-  is_identical(const Function_type* t, bool ignore_receiver,
-	       Cmp_tags, bool errors_are_identical, std::string*) const;
+  is_identical(const Function_type* t, bool ignore_receiver, int flags,
+	       std::string*) const;
 
   // Record that this is a varargs function.
   void
@@ -1984,6 +2087,11 @@ class Function_type : public Type
   Btype*
   get_backend_fntype(Gogo*);
 
+  // Return whether this is a Backend_function_type.
+  virtual bool
+  is_backend_function_type() const
+  { return false; }
+
  protected:
   int
   do_traverse(Traverse*);
@@ -1998,7 +2106,7 @@ class Function_type : public Type
   { return false; }
 
   unsigned int
-  do_hash_for_method(Gogo*) const;
+  do_hash_for_method(Gogo*, int) const;
 
   Btype*
   do_get_backend(Gogo*);
@@ -2077,6 +2185,12 @@ class Backend_function_type : public Function_type
       : Function_type(receiver, parameters, results, location)
   { }
 
+  // Return whether this is a Backend_function_type. This overrides
+  // Function_type::is_backend_function_type.
+  bool
+  is_backend_function_type() const
+  { return true; }
+
  protected:
   Btype*
   do_get_backend(Gogo* gogo)
@@ -2121,7 +2235,7 @@ class Pointer_type : public Type
   { return true; }
 
   unsigned int
-  do_hash_for_method(Gogo*) const;
+  do_hash_for_method(Gogo*, int) const;
 
   Btype*
   do_get_backend(Gogo*);
@@ -2141,6 +2255,37 @@ class Pointer_type : public Type
  private:
   // The type to which this type points.
   Type* to_type_;
+};
+
+// The nil type.  We use a special type for nil because it is not the
+// same as any other type.  In C term nil has type void*, but there is
+// no such type in Go.
+
+class Nil_type : public Type
+{
+ public:
+  Nil_type()
+    : Type(TYPE_NIL)
+  { }
+
+ protected:
+  bool
+  do_compare_is_identity(Gogo*)
+  { return false; }
+
+  Btype*
+  do_get_backend(Gogo* gogo);
+
+  Expression*
+  do_type_descriptor(Gogo*, Named_type*)
+  { go_unreachable(); }
+
+  void
+  do_reflection(Gogo*, std::string*) const
+  { go_unreachable(); }
+
+  void
+  do_mangled_name(Gogo*, std::string* ret) const;
 };
 
 // The type of a field in a struct.
@@ -2312,6 +2457,11 @@ class Struct_type : public Type
   field_count() const
   { return this->fields_->size(); }
 
+  // Location of struct definition.
+  Location
+  location() const
+  { return this->location_; }
+
   // Push a new field onto the end of the struct.  This is used when
   // building a closure variable.
   void
@@ -2332,8 +2482,7 @@ class Struct_type : public Type
 
   // Whether this type is identical with T.
   bool
-  is_identical(const Struct_type* t, Cmp_tags,
-	       bool errors_are_identical) const;
+  is_identical(const Struct_type* t, int) const;
 
   // Return whether NAME is a local field which is not exported.  This
   // is only used for better error reporting.
@@ -2352,7 +2501,7 @@ class Struct_type : public Type
   has_any_methods() const
   { return this->all_methods_ != NULL; }
 
-  // Return the methods for tihs type.  This should only be called
+  // Return the methods for this type.  This should only be called
   // after the finalize_methods pass.
   const Methods*
   methods() const
@@ -2444,7 +2593,7 @@ class Struct_type : public Type
   do_in_heap();
 
   unsigned int
-  do_hash_for_method(Gogo*) const;
+  do_hash_for_method(Gogo*, int) const;
 
   Btype*
   do_get_backend(Gogo*);
@@ -2538,8 +2687,7 @@ class Array_type : public Type
 
   // Whether this type is identical with T.
   bool
-  is_identical(const Array_type* t, Cmp_tags,
-	       bool errors_are_identical) const;
+  is_identical(const Array_type* t, int) const;
 
   // Return an expression for the pointer to the values in an array.
   Expression*
@@ -2621,7 +2769,7 @@ class Array_type : public Type
   { return this->length_ == NULL || this->element_type_->in_heap(); }
 
   unsigned int
-  do_hash_for_method(Gogo*) const;
+  do_hash_for_method(Gogo*, int) const;
 
   Btype*
   do_get_backend(Gogo*);
@@ -2704,8 +2852,7 @@ class Map_type : public Type
 
   // Whether this type is identical with T.
   bool
-  is_identical(const Map_type* t, Cmp_tags,
-	       bool errors_are_identical) const;
+  is_identical(const Map_type* t, int) const;
 
   // Import a map type.
   static Map_type*
@@ -2713,6 +2860,9 @@ class Map_type : public Type
 
   static Type*
   make_map_type_descriptor_type();
+
+  // This must be in  sync with libgo/go/runtime/hashmap.go.
+  static const int bucket_size = 8;
 
  protected:
   int
@@ -2736,7 +2886,7 @@ class Map_type : public Type
   }
 
   unsigned int
-  do_hash_for_method(Gogo*) const;
+  do_hash_for_method(Gogo*, int) const;
 
   Btype*
   do_get_backend(Gogo*);
@@ -2755,7 +2905,6 @@ class Map_type : public Type
 
  private:
   // These must be in sync with libgo/go/runtime/hashmap.go.
-  static const int bucket_size = 8;
   static const int max_key_size = 128;
   static const int max_val_size = 128;
   static const int max_zero_size = 1024;
@@ -2822,8 +2971,7 @@ class Channel_type : public Type
 
   // Whether this type is identical with T.
   bool
-  is_identical(const Channel_type* t, Cmp_tags,
-	       bool errors_are_identical) const;
+  is_identical(const Channel_type* t, int) const;
 
   // Import a channel type.
   static Channel_type*
@@ -2833,7 +2981,7 @@ class Channel_type : public Type
   make_chan_type_descriptor_type();
 
   static Type*
-  select_type(int ncases);
+  select_case_type();
 
  protected:
   int
@@ -2852,7 +3000,7 @@ class Channel_type : public Type
   { return true; }
 
   unsigned int
-  do_hash_for_method(Gogo*) const;
+  do_hash_for_method(Gogo*, int) const;
 
   Btype*
   do_get_backend(Gogo*);
@@ -2911,8 +3059,15 @@ class Interface_type : public Type
     return this->all_methods_ == NULL;
   }
 
-  // Return the list of methods.  This will return NULL for an empty
-  // interface.
+  // Return the list of locally defined methos.  This will return NULL
+  // for an empty interface.  Embedded interfaces will appear in this
+  // list as an entry with no name.
+  const Typed_identifier_list*
+  local_methods() const
+  { return this->parse_methods_; }
+
+  // Return the list of all methods.  This will return NULL for an
+  // empty interface.
   const Typed_identifier_list*
   methods() const;
 
@@ -2942,8 +3097,7 @@ class Interface_type : public Type
   // Whether this type is identical with T.  REASON is as in
   // implements_interface.
   bool
-  is_identical(const Interface_type* t, Cmp_tags,
-	       bool errors_are_identical) const;
+  is_identical(const Interface_type* t, int) const;
 
   // Whether we can assign T to this type.  is_identical is known to
   // be false.
@@ -3003,7 +3157,7 @@ class Interface_type : public Type
   { return true; }
 
   unsigned int
-  do_hash_for_method(Gogo*) const;
+  do_hash_for_method(Gogo*, int) const;
 
   Btype*
   do_get_backend(Gogo*);
@@ -3036,6 +3190,20 @@ class Interface_type : public Type
 
   bool
   assume_identical(const Interface_type*, const Interface_type*) const;
+
+  struct Bmethods_map_entry
+  {
+    Btype *btype;
+    bool is_placeholder;
+  };
+
+  // A mapping from Interface_type to the backend type of its bmethods_,
+  // used to ensure that the backend representation of identical types
+  // is identical.
+  typedef Unordered_map_hash(const Interface_type*, Bmethods_map_entry,
+                             Type_hash_identical, Type_identical) Bmethods_map;
+
+  static Bmethods_map bmethods_map;
 
   // The list of methods associated with the interface from the
   // parser.  This will be NULL for the empty interface.  This may
@@ -3081,8 +3249,8 @@ class Named_type : public Type
       interface_method_tables_(NULL), pointer_interface_method_tables_(NULL),
       location_(location), named_btype_(NULL), dependencies_(),
       is_alias_(false), is_visible_(true), is_error_(false), in_heap_(true),
-      is_placeholder_(false), is_converted_(false), is_circular_(false),
-      is_verified_(false), seen_(false), seen_in_compare_is_identity_(false),
+      is_placeholder_(false), is_converted_(false), is_verified_(false),
+      seen_(false), seen_in_compare_is_identity_(false),
       seen_in_get_backend_(false), seen_alias_(false)
   { }
 
@@ -3182,12 +3350,6 @@ class Named_type : public Type
   bool
   is_valid() const
   { return !this->is_error_; }
-
-  // Whether this is a circular type: a pointer or function type that
-  // refers to itself, which is not possible in C.
-  bool
-  is_circular() const
-  { return this->is_circular_; }
 
   // Return the base type for this type.
   Type*
@@ -3320,7 +3482,7 @@ class Named_type : public Type
   { return this->in_heap_ && this->type_->in_heap(); }
 
   unsigned int
-  do_hash_for_method(Gogo*) const;
+  do_hash_for_method(Gogo*, int) const;
 
   Btype*
   do_get_backend(Gogo*);
@@ -3395,9 +3557,6 @@ class Named_type : public Type
   // Whether this type has been converted to the backend
   // representation.  Implies that is_placeholder_ is false.
   bool is_converted_;
-  // Whether this is a pointer or function type which refers to the
-  // type itself.
-  bool is_circular_;
   // Whether this type has been verified.
   bool is_verified_;
   // In a recursive operation such as has_pointer, this flag is used
@@ -3486,8 +3645,8 @@ class Forward_declaration_type : public Type
   { return this->real_type()->in_heap(); }
 
   unsigned int
-  do_hash_for_method(Gogo* gogo) const
-  { return this->real_type()->hash_for_method(gogo); }
+  do_hash_for_method(Gogo* gogo, int flags) const
+  { return this->real_type()->hash_for_method(gogo, flags); }
 
   Btype*
   do_get_backend(Gogo* gogo);

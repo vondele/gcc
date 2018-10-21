@@ -1,5 +1,5 @@
 /* Functions to support general ended bitmaps.
-   Copyright (C) 1997-2017 Free Software Foundation, Inc.
+   Copyright (C) 1997-2018 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -2162,6 +2162,12 @@ debug (const bitmap_head *ptr)
     debug (*ptr);
   else
     fprintf (stderr, "<nil>\n");
+}
+
+void
+bitmap_head::dump ()
+{
+  debug (this);
 }
 
 #if CHECKING_P

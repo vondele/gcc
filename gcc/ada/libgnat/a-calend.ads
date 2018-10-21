@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 S p e c                                  --
 --                                                                          --
---          Copyright (C) 1992-2017, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2018, Free Software Foundation, Inc.         --
 --                                                                          --
 -- This specification is derived from the Ada Reference Manual for use with --
 -- GNAT. The copyright notice above, and the license provisions that follow --
@@ -35,9 +35,7 @@
 
 package Ada.Calendar with
   SPARK_Mode,
-  Abstract_State => (Clock_Time with Synchronous,
-                                     External => (Async_Readers,
-                                                  Async_Writers)),
+  Abstract_State => (Clock_Time with Synchronous),
   Initializes    => Clock_Time
 is
 
@@ -222,6 +220,11 @@ private
    --  Note: the reason we have two separate types here is to avoid problems
    --  with overloading ambiguities in the body if we tried to use Time as an
    --  internal computational type.
+
+   function Epoch_Offset return Time_Rep;
+   pragma Inline (Epoch_Offset);
+   --  Return the difference between 2150-1-1 UTC and 1970-1-1 UTC expressed in
+   --  nanoseconds. Note that year 2100 is non-leap.
 
    Days_In_Month : constant array (Month_Number) of Day_Number :=
                      (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31);

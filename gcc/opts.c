@@ -1,5 +1,5 @@
 /* Command line option handling.
-   Copyright (C) 2002-2017 Free Software Foundation, Inc.
+   Copyright (C) 2002-2018 Free Software Foundation, Inc.
    Contributed by Neil Booth.
 
 This file is part of GCC.
@@ -37,7 +37,7 @@ static void set_Wstrict_aliasing (struct gcc_options *opts, int onoff);
 /* Indexed by enum debug_info_type.  */
 const char *const debug_type_names[] =
 {
-  "none", "stabs", "coff", "dwarf-2", "xcoff", "vms"
+  "none", "stabs", "dwarf-2", "xcoff", "vms"
 };
 
 /* Parse the -femit-struct-debug-detailed option value
@@ -476,6 +476,7 @@ static const struct default_options default_options_table[] =
     { OPT_LEVELS_1_PLUS_NOT_DEBUG, OPT_ftree_pta, NULL, 1 },
     { OPT_LEVELS_1_PLUS_NOT_DEBUG, OPT_fssa_phiopt, NULL, 1 },
     { OPT_LEVELS_1_PLUS, OPT_ftree_builtin_call_dce, NULL, 1 },
+    { OPT_LEVELS_1_PLUS, OPT_fomit_frame_pointer, NULL, 1 },
 
     /* -O2 optimizations.  */
     { OPT_LEVELS_2_PLUS, OPT_finline_small_functions, NULL, 1 },
@@ -509,10 +510,10 @@ static const struct default_options default_options_table[] =
     { OPT_LEVELS_2_PLUS, OPT_fdevirtualize, NULL, 1 },
     { OPT_LEVELS_2_PLUS, OPT_fdevirtualize_speculatively, NULL, 1 },
     { OPT_LEVELS_2_PLUS, OPT_fipa_sra, NULL, 1 },
-    { OPT_LEVELS_2_PLUS, OPT_falign_loops, NULL, 1 },
-    { OPT_LEVELS_2_PLUS, OPT_falign_jumps, NULL, 1 },
-    { OPT_LEVELS_2_PLUS, OPT_falign_labels, NULL, 1 },
-    { OPT_LEVELS_2_PLUS, OPT_falign_functions, NULL, 1 },
+    { OPT_LEVELS_2_PLUS_SPEED_ONLY, OPT_falign_loops, NULL, 1 },
+    { OPT_LEVELS_2_PLUS_SPEED_ONLY, OPT_falign_jumps, NULL, 1 },
+    { OPT_LEVELS_2_PLUS_SPEED_ONLY, OPT_falign_labels, NULL, 1 },
+    { OPT_LEVELS_2_PLUS_SPEED_ONLY, OPT_falign_functions, NULL, 1 },
     { OPT_LEVELS_2_PLUS, OPT_ftree_tail_merge, NULL, 1 },
     { OPT_LEVELS_2_PLUS, OPT_fvect_cost_model_, NULL, VECT_COST_MODEL_CHEAP },
     { OPT_LEVELS_2_PLUS_SPEED_ONLY, OPT_foptimize_strlen, NULL, 1 },
@@ -526,6 +527,7 @@ static const struct default_options default_options_table[] =
     /* -O3 optimizations.  */
     { OPT_LEVELS_3_PLUS, OPT_ftree_loop_distribute_patterns, NULL, 1 },
     { OPT_LEVELS_3_PLUS, OPT_ftree_loop_distribution, NULL, 1 },
+    { OPT_LEVELS_3_PLUS, OPT_floop_interchange, NULL, 1 },
     { OPT_LEVELS_3_PLUS, OPT_fpredictive_commoning, NULL, 1 },
     { OPT_LEVELS_3_PLUS, OPT_fsplit_paths, NULL, 1 },
     /* Inlining of functions reducing size is a good idea with -Os
@@ -534,6 +536,7 @@ static const struct default_options default_options_table[] =
     { OPT_LEVELS_1_PLUS_NOT_DEBUG, OPT_finline_functions_called_once, NULL, 1 },
     { OPT_LEVELS_3_PLUS, OPT_fsplit_loops, NULL, 1 },
     { OPT_LEVELS_3_PLUS, OPT_funswitch_loops, NULL, 1 },
+    { OPT_LEVELS_3_PLUS, OPT_floop_unroll_and_jam, NULL, 1 },
     { OPT_LEVELS_3_PLUS, OPT_fgcse_after_reload, NULL, 1 },
     { OPT_LEVELS_3_PLUS, OPT_ftree_loop_vectorize, NULL, 1 },
     { OPT_LEVELS_3_PLUS, OPT_ftree_slp_vectorize, NULL, 1 },
@@ -697,19 +700,27 @@ finish_options (struct gcc_options *opts, struct gcc_options *opts_set,
   enum unwind_info_type ui_except;
 
   if (opts->x_dump_base_name
-      && ! IS_ABSOLUTE_PATH (opts->x_dump_base_name)
       && ! opts->x_dump_base_name_prefixed)
     {
-      /* First try to make OPTS->X_DUMP_BASE_NAME relative to the
-	 OPTS->X_DUMP_DIR_NAME directory.  Then try to make
-	 OPTS->X_DUMP_BASE_NAME relative to the OPTS->X_AUX_BASE_NAME
-	 directory, typically the directory to contain the object
-	 file.  */
-      if (opts->x_dump_dir_name)
+      const char *sep = opts->x_dump_base_name;
+
+      for (; *sep; sep++)
+	if (IS_DIR_SEPARATOR (*sep))
+	  break;
+
+      if (*sep)
+	/* If dump_base_path contains subdirectories, don't prepend
+	   anything.  */;
+      else if (opts->x_dump_dir_name)
+	/* We have a DUMP_DIR_NAME, prepend that.  */
 	opts->x_dump_base_name = opts_concat (opts->x_dump_dir_name,
 					      opts->x_dump_base_name, NULL);
       else if (opts->x_aux_base_name
 	       && strcmp (opts->x_aux_base_name, HOST_BIT_BUCKET) != 0)
+	/* AUX_BASE_NAME is set and is not the bit bucket.  If it
+	   contains a directory component, prepend those directories.
+	   Typically this places things in the same directory as the
+	   object file.  */
 	{
 	  const char *aux_base;
 
@@ -728,7 +739,9 @@ finish_options (struct gcc_options *opts, struct gcc_options *opts_set,
 	      opts->x_dump_base_name = new_dump_base_name;
 	    }
 	}
-	opts->x_dump_base_name_prefixed = true;
+
+      /* It is definitely prefixed now.  */
+      opts->x_dump_base_name_prefixed = true;
     }
 
   /* Handle related options for unit-at-a-time, toplevel-reorder, and
@@ -952,6 +965,19 @@ finish_options (struct gcc_options *opts, struct gcc_options *opts_set,
   if (opts->x_dwarf_split_debug_info)
     opts->x_debug_generate_pub_sections = 2;
 
+  if ((opts->x_flag_sanitize
+       & (SANITIZE_USER_ADDRESS | SANITIZE_KERNEL_ADDRESS)) == 0)
+    {
+      if (opts->x_flag_sanitize & SANITIZE_POINTER_COMPARE)
+	error_at (loc,
+		  "%<-fsanitize=pointer-compare%> must be combined with "
+		  "%<-fsanitize=address%> or %<-fsanitize=kernel-address%>");
+      if (opts->x_flag_sanitize & SANITIZE_POINTER_SUBTRACT)
+	error_at (loc,
+		  "%<-fsanitize=pointer-subtract%> must be combined with "
+		  "%<-fsanitize=address%> or %<-fsanitize=kernel-address%>");
+    }
+
   /* Userspace and kernel ASan conflict with each other.  */
   if ((opts->x_flag_sanitize & SANITIZE_USER_ADDRESS)
       && (opts->x_flag_sanitize & SANITIZE_KERNEL_ADDRESS))
@@ -1064,6 +1090,21 @@ wrap_help (const char *help,
   while (remaining);
 }
 
+/* Data structure used to print list of valid option values.  */
+
+struct option_help_tuple
+{
+  option_help_tuple (int code, vec<const char *> values):
+    m_code (code), m_values (values)
+  {}
+
+  /* Code of an option.  */
+  int m_code;
+
+  /* List of possible values.  */
+  vec<const char *> m_values;
+};
+
 /* Print help for a specific front-end, etc.  */
 static void
 print_filtered_help (unsigned int include_flags,
@@ -1116,6 +1157,8 @@ print_filtered_help (unsigned int include_flags,
 
   if (!opts->x_help_enum_printed)
     opts->x_help_enum_printed = XCNEWVAR (char, cl_enums_count);
+
+  auto_vec<option_help_tuple> help_tuples;
 
   for (i = 0; i < cl_options_count; i++)
     {
@@ -1277,6 +1320,13 @@ print_filtered_help (unsigned int include_flags,
       if (option->var_type == CLVC_ENUM
 	  && opts->x_help_enum_printed[option->var_enum] != 2)
 	opts->x_help_enum_printed[option->var_enum] = 1;
+      else
+	{
+	  vec<const char *> option_values
+	    = targetm_common.get_valid_option_values (i, NULL);
+	  if (!option_values.is_empty ())
+	    help_tuples.safe_push (option_help_tuple (i, option_values));
+	}
     }
 
   if (! found)
@@ -1339,6 +1389,15 @@ print_filtered_help (unsigned int include_flags,
 	}
       printf ("\n\n");
       opts->x_help_enum_printed[i] = 2;
+    }
+
+  for (unsigned i = 0; i < help_tuples.length (); i++)
+    {
+      const struct cl_option *option = cl_options + help_tuples[i].m_code;
+      printf ("  Known valid arguments for %s option:\n   ", option->opt_text);
+      for (unsigned j = 0; j < help_tuples[i].m_values.length (); j++)
+	printf (" %s", help_tuples[i].m_values[j]);
+      printf ("\n\n");
     }
 }
 
@@ -1496,6 +1555,8 @@ const struct sanitizer_opts_s sanitizer_opts[] =
   SANITIZER_OPT (address, (SANITIZE_ADDRESS | SANITIZE_USER_ADDRESS), true),
   SANITIZER_OPT (kernel-address, (SANITIZE_ADDRESS | SANITIZE_KERNEL_ADDRESS),
 		 true),
+  SANITIZER_OPT (pointer-compare, SANITIZE_POINTER_COMPARE, true),
+  SANITIZER_OPT (pointer-subtract, SANITIZE_POINTER_SUBTRACT, true),
   SANITIZER_OPT (thread, SANITIZE_THREAD, false),
   SANITIZER_OPT (leak, SANITIZE_LEAK, false),
   SANITIZER_OPT (shift, SANITIZE_SHIFT, true),
@@ -1521,6 +1582,7 @@ const struct sanitizer_opts_s sanitizer_opts[] =
   SANITIZER_OPT (object-size, SANITIZE_OBJECT_SIZE, true),
   SANITIZER_OPT (vptr, SANITIZE_VPTR, true),
   SANITIZER_OPT (pointer-overflow, SANITIZE_POINTER_OVERFLOW, true),
+  SANITIZER_OPT (builtin, SANITIZE_BUILTIN, true),
   SANITIZER_OPT (all, ~0U, true),
 #undef SANITIZER_OPT
   { NULL, 0U, 0UL, false }
@@ -1700,11 +1762,10 @@ parse_sanitizer_options (const char *p, location_t loc, int scode,
 }
 
 /* Parse string values of no_sanitize attribute passed in VALUE.
-   Values are separated with comma.  Wrong argument is stored to
-   WRONG_ARGUMENT variable.  */
+   Values are separated with comma.  */
 
 unsigned int
-parse_no_sanitize_attribute (char *value, char **wrong_argument)
+parse_no_sanitize_attribute (char *value)
 {
   unsigned int flags = 0;
   unsigned int i;
@@ -1722,12 +1783,81 @@ parse_no_sanitize_attribute (char *value, char **wrong_argument)
 	  }
 
       if (sanitizer_opts[i].name == NULL)
-	*wrong_argument = q;
+	warning (OPT_Wattributes,
+		 "%<%s%> attribute directive ignored", q);
 
       q = strtok (NULL, ",");
     }
 
   return flags;
+}
+
+/* Parse -falign-NAME format for a FLAG value.  Return individual
+   parsed integer values into RESULT_VALUES array.  If REPORT_ERROR is
+   set, print error message at LOC location.  */
+
+bool
+parse_and_check_align_values (const char *flag,
+			      const char *name,
+			      auto_vec<unsigned> &result_values,
+			      bool report_error,
+			      location_t loc)
+{
+  char *str = xstrdup (flag);
+  for (char *p = strtok (str, ":"); p; p = strtok (NULL, ":"))
+    {
+      char *end;
+      int v = strtol (p, &end, 10);
+      if (*end != '\0' || v < 0)
+	{
+	  if (report_error)
+	    error_at (loc, "invalid arguments for %<-falign-%s%> option: %qs",
+		      name, flag);
+
+	  return false;
+	}
+
+      result_values.safe_push ((unsigned)v);
+    }
+
+  free (str);
+
+  /* Check that we have a correct number of values.  */
+#ifdef SUBALIGN_LOG
+  unsigned max_valid_values = 4;
+#else
+  unsigned max_valid_values = 2;
+#endif
+
+  if (result_values.is_empty ()
+      || result_values.length () > max_valid_values)
+    {
+      if (report_error)
+	error_at (loc, "invalid number of arguments for %<-falign-%s%> "
+		  "option: %qs", name, flag);
+      return false;
+    }
+
+  for (unsigned i = 0; i < result_values.length (); i++)
+    if (result_values[i] > MAX_CODE_ALIGN_VALUE)
+      {
+	if (report_error)
+	  error_at (loc, "%<-falign-%s%> is not between 0 and %d",
+		    name, MAX_CODE_ALIGN_VALUE);
+	return false;
+      }
+
+  return true;
+}
+
+/* Check that alignment value FLAG for -falign-NAME is valid at a given
+   location LOC.  */
+
+static void
+check_alignment_argument (location_t loc, const char *flag, const char *name)
+{
+  auto_vec<unsigned> align_result;
+  parse_and_check_align_values (flag, name, align_result, true, loc);
 }
 
 /* Handle target- and language-independent options.  Return zero to
@@ -1747,7 +1877,7 @@ common_handle_option (struct gcc_options *opts,
 {
   size_t scode = decoded->opt_index;
   const char *arg = decoded->arg;
-  int value = decoded->value;
+  HOST_WIDE_INT value = decoded->value;
   enum opt_code code = (enum opt_code) scode;
 
   gcc_assert (decoded->canonical_option_num_elements <= 2);
@@ -1933,6 +2063,9 @@ common_handle_option (struct gcc_options *opts,
       opts->x_exit_after_options = true;
       break;
 
+    case OPT__completion_:
+      break;
+
     case OPT_fsanitize_:
       opts->x_flag_sanitize
 	= parse_sanitizer_options (arg, loc, code,
@@ -2007,22 +2140,11 @@ common_handle_option (struct gcc_options *opts,
 			       opts, opts_set, loc, dc);
       break;
 
-    case OPT_Wlarger_than_:
-      opts->x_larger_than_size = value;
-      opts->x_warn_larger_than = value != -1;
-      break;
-
     case OPT_Wfatal_errors:
       dc->fatal_errors = value;
       break;
 
-    case OPT_Wframe_larger_than_:
-      opts->x_frame_larger_than_size = value;
-      opts->x_warn_frame_larger_than = value != -1;
-      break;
-
     case OPT_Wstack_usage_:
-      opts->x_warn_stack_usage = value;
       opts->x_flag_stack_usage_info = value != -1;
       break;
 
@@ -2074,6 +2196,7 @@ common_handle_option (struct gcc_options *opts,
       break;
 
     case OPT_fdebug_prefix_map_:
+    case OPT_ffile_prefix_map_:
       /* Deferred.  */
       break;
 
@@ -2083,6 +2206,14 @@ common_handle_option (struct gcc_options *opts,
  
     case OPT_fdiagnostics_show_caret:
       dc->show_caret = value;
+      break;
+
+    case OPT_fdiagnostics_show_labels:
+      dc->show_labels_p = value;
+      break;
+
+    case OPT_fdiagnostics_show_line_numbers:
+      dc->show_line_numbers_p = value;
       break;
 
     case OPT_fdiagnostics_color_:
@@ -2095,6 +2226,10 @@ common_handle_option (struct gcc_options *opts,
 
     case OPT_fdiagnostics_show_option:
       dc->show_option_requested = value;
+      break;
+
+    case OPT_fdiagnostics_minimum_margin_width_:
+      dc->min_margin_width = value;
       break;
 
     case OPT_fdump_:
@@ -2181,7 +2316,7 @@ common_handle_option (struct gcc_options *opts,
     case OPT_fpack_struct_:
       if (value <= 0 || (value & (value - 1)) || value > 16)
 	error_at (loc,
-		  "structure alignment must be a small power of two, not %d",
+		  "structure alignment must be a small power of two, not %wu",
 		  value);
       else
 	opts->x_initial_max_fld_align = value;
@@ -2350,10 +2485,6 @@ common_handle_option (struct gcc_options *opts,
                        loc);
       break;
 
-    case OPT_gcoff:
-      set_debug_level (SDB_DEBUG, false, arg, opts, opts_set, loc);
-      break;
-
     case OPT_gdwarf:
       if (arg && strlen (arg) != 0)
         {
@@ -2368,7 +2499,7 @@ common_handle_option (struct gcc_options *opts,
       /* FALLTHRU */
     case OPT_gdwarf_:
       if (value < 2 || value > 5)
-	error_at (loc, "dwarf version %d is not supported", value);
+	error_at (loc, "dwarf version %wu is not supported", value);
       else
 	opts->x_dwarf_version = value;
       set_debug_level (DWARF2_DEBUG, false, "", opts, opts_set, loc);
@@ -2440,9 +2571,32 @@ common_handle_option (struct gcc_options *opts,
 	opts->x_flag_wrapv = 0;
       break;
 
+    case OPT_fstrict_overflow:
+      opts->x_flag_wrapv = !value;
+      opts->x_flag_wrapv_pointer = !value;
+      if (!value)
+	opts->x_flag_trapv = 0;
+      break;
+
     case OPT_fipa_icf:
       opts->x_flag_ipa_icf_functions = value;
       opts->x_flag_ipa_icf_variables = value;
+      break;
+
+    case OPT_falign_loops_:
+      check_alignment_argument (loc, arg, "loops");
+      break;
+
+    case OPT_falign_jumps_:
+      check_alignment_argument (loc, arg, "jumps");
+      break;
+
+    case OPT_falign_labels_:
+      check_alignment_argument (loc, arg, "labels");
+      break;
+
+    case OPT_falign_functions_:
+      check_alignment_argument (loc, arg, "functions");
       break;
 
     default:

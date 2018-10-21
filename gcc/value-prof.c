@@ -1,5 +1,5 @@
 /* Transformations based on profile information for values.
-   Copyright (C) 2003-2017 Free Software Foundation, Inc.
+   Copyright (C) 2003-2018 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -43,7 +43,6 @@ along with GCC; see the file COPYING3.  If not see
 #include "dumpfile.h"
 #include "builtins.h"
 #include "params.h"
-#include "tree-chkp.h"
 
 /* In this file value profile based optimizations are placed.  Currently the
    following optimizations are implemented (for more detailed descriptions
@@ -583,13 +582,14 @@ static bool
 check_counter (gimple *stmt, const char * name,
 	       gcov_type *count, gcov_type *all, profile_count bb_count_d)
 {
-  gcov_type bb_count = bb_count_d.to_gcov_type ();
+  gcov_type bb_count = bb_count_d.ipa ().to_gcov_type ();
   if (*all != bb_count || *count > *all)
     {
-      location_t locus;
-      locus = (stmt != NULL)
-              ? gimple_location (stmt)
-              : DECL_SOURCE_LOCATION (current_function_decl);
+      dump_user_location_t locus;
+      locus = ((stmt != NULL)
+	       ? dump_user_location_t (stmt)
+	       : dump_user_location_t::from_function_decl
+		   (current_function_decl));
       if (flag_profile_correction)
         {
           if (dump_enabled_p ())
@@ -604,7 +604,7 @@ check_counter (gimple *stmt, const char * name,
 	}
       else
 	{
-	  error_at (locus, "corrupted value profile: %s "
+	  error_at (locus.get_location_t (), "corrupted value profile: %s "
 		    "profile counter (%d out of %d) inconsistent with "
 		    "basic-block count (%d)",
 		    name,
@@ -671,11 +671,6 @@ gimple_value_profile_transformations (void)
 		}
 	    }
         }
-    }
-
-  if (changed)
-    {
-      counts_to_freqs ();
     }
 
   return changed;
@@ -745,20 +740,16 @@ gimple_divmod_fixed_value (gassign *stmt, tree value, profile_probability prob,
   e12->flags &= ~EDGE_FALLTHRU;
   e12->flags |= EDGE_FALSE_VALUE;
   e12->probability = prob;
-  e12->count = profile_count::from_gcov_type (count);
 
   e13 = make_edge (bb, bb3, EDGE_TRUE_VALUE);
   e13->probability = prob.invert ();
-  e13->count = profile_count::from_gcov_type (all - count);
 
   remove_edge (e23);
 
   e24 = make_edge (bb2, bb4, EDGE_FALLTHRU);
   e24->probability = profile_probability::always ();
-  e24->count = profile_count::from_gcov_type (count);
 
   e34->probability = profile_probability::always ();
-  e34->count = profile_count::from_gcov_type (all - count);
 
   return tmp2;
 }
@@ -830,12 +821,9 @@ gimple_divmod_fixed_value_transform (gimple_stmt_iterator *si)
 
   if (dump_file)
     {
-      fprintf (dump_file, "Div/mod by constant ");
-      print_generic_expr (dump_file, value, TDF_SLIM);
-      fprintf (dump_file, "=");
+      fprintf (dump_file, "Transformation done: div/mod by constant ");
       print_generic_expr (dump_file, tree_val, TDF_SLIM);
-      fprintf (dump_file, " transformation on insn ");
-      print_gimple_stmt (dump_file, stmt, 0, TDF_SLIM);
+      fprintf (dump_file, "\n");
     }
 
   gimple_assign_set_rhs_from_tree (si, result);
@@ -910,20 +898,16 @@ gimple_mod_pow2 (gassign *stmt, profile_probability prob, gcov_type count, gcov_
   e12->flags &= ~EDGE_FALLTHRU;
   e12->flags |= EDGE_FALSE_VALUE;
   e12->probability = prob;
-  e12->count = profile_count::from_gcov_type (count);
 
   e13 = make_edge (bb, bb3, EDGE_TRUE_VALUE);
   e13->probability = prob.invert ();
-  e13->count = profile_count::from_gcov_type (all - count);
 
   remove_edge (e23);
 
   e24 = make_edge (bb2, bb4, EDGE_FALLTHRU);
   e24->probability = profile_probability::always ();
-  e24->count = profile_count::from_gcov_type (count);
 
   e34->probability = profile_probability::always ();
-  e34->count = profile_count::from_gcov_type (all - count);
 
   return result;
 }
@@ -969,17 +953,14 @@ gimple_mod_pow2_value_transform (gimple_stmt_iterator *si)
       || optimize_bb_for_size_p (gimple_bb (stmt)))
     return false;
 
-  if (dump_file)
-    {
-      fprintf (dump_file, "Mod power of 2 transformation on insn ");
-      print_gimple_stmt (dump_file, stmt, 0, TDF_SLIM);
-    }
-
   /* Compute probability of taking the optimal path.  */
   all = count + wrong_values;
 
   if (check_counter (stmt, "pow2", &count, &all, gimple_bb (stmt)->count))
     return false;
+
+  if (dump_file)
+    fprintf (dump_file, "Transformation done: mod power of 2\n");
 
   if (all > 0)
     prob = profile_probability::probability_in_gcov_type (count, all);
@@ -1076,26 +1057,21 @@ gimple_mod_subtract (gassign *stmt, profile_probability prob1,
   e12->flags &= ~EDGE_FALLTHRU;
   e12->flags |= EDGE_FALSE_VALUE;
   e12->probability = prob1.invert ();
-  e12->count = profile_count::from_gcov_type (all - count1);
 
   e14 = make_edge (bb, bb4, EDGE_TRUE_VALUE);
   e14->probability = prob1;
-  e14->count = profile_count::from_gcov_type (count1);
 
   if (ncounts)  /* Assumed to be 0 or 1.  */
     {
       e23->flags &= ~EDGE_FALLTHRU;
       e23->flags |= EDGE_FALSE_VALUE;
-      e23->count = profile_count::from_gcov_type (all - count1 - count2);
       e23->probability = prob2.invert ();
 
       e24 = make_edge (bb2, bb4, EDGE_TRUE_VALUE);
       e24->probability = prob2;
-      e24->count = profile_count::from_gcov_type (count2);
     }
 
   e34->probability = profile_probability::always ();
-  e34->count = profile_count::from_gcov_type (all - count1 - count2);
 
   return result;
 }
@@ -1169,10 +1145,7 @@ gimple_mod_subtract_transform (gimple_stmt_iterator *si)
 
   gimple_remove_histogram_value (cfun, stmt, histogram);
   if (dump_file)
-    {
-      fprintf (dump_file, "Mod subtract transformation on insn ");
-      print_gimple_stmt (dump_file, stmt, 0, TDF_SLIM);
-    }
+    fprintf (dump_file, "Transformation done: mod subtract\n");
 
   /* Compute probability of taking the optimal path(s).  */
   if (all > 0)
@@ -1290,13 +1263,11 @@ find_func_by_profile_id (int profile_id)
 bool
 check_ic_target (gcall *call_stmt, struct cgraph_node *target)
 {
-   location_t locus;
    if (gimple_check_call_matching_types (call_stmt, target->decl, true))
      return true;
 
-   locus =  gimple_location (call_stmt);
    if (dump_enabled_p ())
-     dump_printf_loc (MSG_MISSED_OPTIMIZATION, locus,
+     dump_printf_loc (MSG_MISSED_OPTIMIZATION, call_stmt,
                       "Skipping target %s with mismatching types for icall\n",
                       target->name ());
    return false;
@@ -1312,35 +1283,29 @@ check_ic_target (gcall *call_stmt, struct cgraph_node *target)
 
 gcall *
 gimple_ic (gcall *icall_stmt, struct cgraph_node *direct_call,
-	   profile_probability prob, profile_count count, profile_count all)
+	   profile_probability prob)
 {
   gcall *dcall_stmt;
   gassign *load_stmt;
   gcond *cond_stmt;
-  gcall *iretbnd_stmt = NULL;
   tree tmp0, tmp1, tmp;
   basic_block cond_bb, dcall_bb, icall_bb, join_bb = NULL;
-  tree optype = build_pointer_type (void_type_node);
   edge e_cd, e_ci, e_di, e_dj = NULL, e_ij;
   gimple_stmt_iterator gsi;
   int lp_nr, dflags;
   edge e_eh, e;
   edge_iterator ei;
-  gimple_stmt_iterator psi;
 
   cond_bb = gimple_bb (icall_stmt);
   gsi = gsi_for_stmt (icall_stmt);
 
-  if (gimple_call_with_bounds_p (icall_stmt) && gimple_call_lhs (icall_stmt))
-    iretbnd_stmt = chkp_retbnd_call_by_val (gimple_call_lhs (icall_stmt));
-
-  tmp0 = make_temp_ssa_name (optype, NULL, "PROF");
-  tmp1 = make_temp_ssa_name (optype, NULL, "PROF");
+  tmp0 = make_temp_ssa_name (ptr_type_node, NULL, "PROF");
+  tmp1 = make_temp_ssa_name (ptr_type_node, NULL, "PROF");
   tmp = unshare_expr (gimple_call_fn (icall_stmt));
   load_stmt = gimple_build_assign (tmp0, tmp);
   gsi_insert_before (&gsi, load_stmt, GSI_SAME_STMT);
 
-  tmp = fold_convert (optype, build_addr (direct_call->decl));
+  tmp = fold_convert (ptr_type_node, build_addr (direct_call->decl));
   load_stmt = gimple_build_assign (tmp1, tmp);
   gsi_insert_before (&gsi, load_stmt, GSI_SAME_STMT);
 
@@ -1367,11 +1332,11 @@ gimple_ic (gcall *icall_stmt, struct cgraph_node *direct_call,
   /* Edge e_cd connects cond_bb to dcall_bb, etc; note the first letters. */
   e_cd = split_block (cond_bb, cond_stmt);
   dcall_bb = e_cd->dest;
-  dcall_bb->count = count;
+  dcall_bb->count = cond_bb->count.apply_probability (prob);
 
   e_di = split_block (dcall_bb, dcall_stmt);
   icall_bb = e_di->dest;
-  icall_bb->count = all - count;
+  icall_bb->count = cond_bb->count - dcall_bb->count;
 
   /* Do not disturb existing EH edges from the indirect call.  */
   if (!stmt_ends_bb_p (icall_stmt))
@@ -1383,37 +1348,29 @@ gimple_ic (gcall *icall_stmt, struct cgraph_node *direct_call,
       if (e_ij != NULL)
 	{
 	  e_ij->probability = profile_probability::always ();
-	  e_ij->count = all - count;
 	  e_ij = single_pred_edge (split_edge (e_ij));
 	}
     }
   if (e_ij != NULL)
     {
       join_bb = e_ij->dest;
-      join_bb->count = all;
+      join_bb->count = cond_bb->count;
     }
 
   e_cd->flags = (e_cd->flags & ~EDGE_FALLTHRU) | EDGE_TRUE_VALUE;
   e_cd->probability = prob;
-  e_cd->count = count;
 
   e_ci = make_edge (cond_bb, icall_bb, EDGE_FALSE_VALUE);
   e_ci->probability = prob.invert ();
-  e_ci->count = all - count;
 
   remove_edge (e_di);
 
   if (e_ij != NULL)
     {
-      if ((dflags & ECF_NORETURN) != 0)
-	e_ij->count = all;
-      else
+      if ((dflags & ECF_NORETURN) == 0)
 	{
 	  e_dj = make_edge (dcall_bb, join_bb, EDGE_FALLTHRU);
 	  e_dj->probability = profile_probability::always ();
-	  e_dj->count = count;
-
-	  e_ij->count = all - count;
 	}
       e_ij->probability = profile_probability::always ();
     }
@@ -1431,55 +1388,6 @@ gimple_ic (gcall *icall_stmt, struct cgraph_node *direct_call,
       gimple_call_set_lhs (dcall_stmt,
 			   duplicate_ssa_name (result, dcall_stmt));
       add_phi_arg (phi, gimple_call_lhs (dcall_stmt), e_dj, UNKNOWN_LOCATION);
-
-      /* If indirect call has following BUILT_IN_CHKP_BNDRET
-	 call then we need to make it's copy for the direct
-	 call.  */
-      if (iretbnd_stmt)
-	{
-	  if (gimple_call_lhs (iretbnd_stmt))
-	    {
-	      gimple *copy;
-
-	      if (TREE_CODE (gimple_vdef (iretbnd_stmt)) == SSA_NAME)
-		{
-	          unlink_stmt_vdef (iretbnd_stmt);
-	          release_ssa_name (gimple_vdef (iretbnd_stmt));
-		}
-	      gimple_set_vdef (iretbnd_stmt, NULL_TREE);
-	      gimple_set_vuse (iretbnd_stmt, NULL_TREE);
-	      update_stmt (iretbnd_stmt);
-
-	      result = gimple_call_lhs (iretbnd_stmt);
-	      phi = create_phi_node (result, join_bb);
-
-	      copy = gimple_copy (iretbnd_stmt);
-	      gimple_call_set_arg (copy, 0,
-				   gimple_call_lhs (dcall_stmt));
-	      gimple_call_set_lhs (copy, duplicate_ssa_name (result, copy));
-	      gsi_insert_on_edge (e_dj, copy);
-	      add_phi_arg (phi, gimple_call_lhs (copy),
-			   e_dj, UNKNOWN_LOCATION);
-
-	      gimple_call_set_arg (iretbnd_stmt, 0,
-				   gimple_call_lhs (icall_stmt));
-	      gimple_call_set_lhs (iretbnd_stmt,
-				   duplicate_ssa_name (result, iretbnd_stmt));
-	      psi = gsi_for_stmt (iretbnd_stmt);
-	      gsi_remove (&psi, false);
-	      gsi_insert_on_edge (e_ij, iretbnd_stmt);
-	      add_phi_arg (phi, gimple_call_lhs (iretbnd_stmt),
-			   e_ij, UNKNOWN_LOCATION);
-
-	      gsi_commit_one_edge_insert (e_dj, NULL);
-	      gsi_commit_one_edge_insert (e_ij, NULL);
-	    }
-	  else
-	    {
-	      psi = gsi_for_stmt (iretbnd_stmt);
-	      gsi_remove (&psi, true);
-	    }
-	}
     }
 
   /* Build an EH edge for the direct call if necessary.  */
@@ -1494,7 +1402,6 @@ gimple_ic (gcall *icall_stmt, struct cgraph_node *direct_call,
       {
 	e = make_edge (dcall_bb, e_eh->dest, e_eh->flags);
 	e->probability = e_eh->probability;
-	e->count = e_eh->count;
 	for (gphi_iterator psi = gsi_start_phis (e_eh->dest);
 	     !gsi_end_p (psi); gsi_next (&psi))
 	  {
@@ -1540,7 +1447,7 @@ gimple_ic_transform (gimple_stmt_iterator *gsi)
   count = histogram->hvalue.counters [1];
   all = histogram->hvalue.counters [2];
 
-  bb_all = gimple_bb (stmt)->count.to_gcov_type ();
+  bb_all = gimple_bb (stmt)->count.ipa ().to_gcov_type ();
   /* The order of CHECK_COUNTER calls is important -
      since check_counter can correct the third parameter
      and we want to make count <= all <= bb_all. */
@@ -1610,14 +1517,11 @@ interesting_stringop_to_profile_p (gcall *call, int *size_arg)
   enum built_in_function fcode;
 
   fcode = DECL_FUNCTION_CODE (gimple_call_fndecl (call));
-  if (fcode != BUILT_IN_MEMCPY && fcode != BUILT_IN_MEMPCPY
-      && fcode != BUILT_IN_MEMSET && fcode != BUILT_IN_BZERO)
-    return false;
-
   switch (fcode)
     {
      case BUILT_IN_MEMCPY:
      case BUILT_IN_MEMPCPY:
+     case BUILT_IN_MEMMOVE:
        *size_arg = 2;
        return validate_gimple_arglist (call, POINTER_TYPE, POINTER_TYPE,
 				       INTEGER_TYPE, VOID_TYPE);
@@ -1630,7 +1534,7 @@ interesting_stringop_to_profile_p (gcall *call, int *size_arg)
        return validate_gimple_arglist (call, POINTER_TYPE, INTEGER_TYPE,
 				       VOID_TYPE);
      default:
-       gcc_unreachable ();
+       return false;
     }
 }
 
@@ -1704,20 +1608,16 @@ gimple_stringop_fixed_value (gcall *vcall_stmt, tree icall_size, profile_probabi
 
   e_ci->flags = (e_ci->flags & ~EDGE_FALLTHRU) | EDGE_TRUE_VALUE;
   e_ci->probability = prob;
-  e_ci->count = profile_count::from_gcov_type (count);
 
   e_cv = make_edge (cond_bb, vcall_bb, EDGE_FALSE_VALUE);
   e_cv->probability = prob.invert ();
-  e_cv->count = profile_count::from_gcov_type (all - count);
 
   remove_edge (e_iv);
 
   e_ij = make_edge (icall_bb, join_bb, EDGE_FALLTHRU);
   e_ij->probability = profile_probability::always ();
-  e_ij->count = profile_count::from_gcov_type (count);
 
   e_vj->probability = profile_probability::always ();
-  e_vj->count = profile_count::from_gcov_type (all - count);
 
   /* Insert PHI node for the call result if necessary.  */
   if (gimple_call_lhs (vcall_stmt)
@@ -1797,6 +1697,7 @@ gimple_stringops_transform (gimple_stmt_iterator *gsi)
     {
     case BUILT_IN_MEMCPY:
     case BUILT_IN_MEMPCPY:
+    case BUILT_IN_MEMMOVE:
       src = gimple_call_arg (stmt, 1);
       src_align = get_pointer_alignment (src);
       if (!can_move_by_pieces (val, MIN (dest_align, src_align)))
@@ -1831,11 +1732,9 @@ gimple_stringops_transform (gimple_stmt_iterator *gsi)
     }
 
   if (dump_file)
-    {
-      fprintf (dump_file, "Single value %i stringop transformation on ",
-	       (int)val);
-      print_gimple_stmt (dump_file, stmt, 0, TDF_SLIM);
-    }
+    fprintf (dump_file,
+	     "Transformation done: single value %i stringop for %s\n",
+	     (int)val, built_in_names[(int)fcode]);
 
   gimple_stringop_fixed_value (stmt, tree_val, prob, count, all);
 
@@ -2084,7 +1983,7 @@ gimple_find_values_to_profile (histogram_values *values)
 	default:
 	  gcc_unreachable ();
 	}
-      if (dump_file)
+      if (dump_file && hist->hvalue.stmt != NULL)
         {
 	  fprintf (dump_file, "Stmt ");
           print_gimple_stmt (dump_file, hist->hvalue.stmt, 0, TDF_SLIM);

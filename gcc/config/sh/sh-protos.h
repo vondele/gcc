@@ -1,5 +1,5 @@
 /* Definitions of target machine for GNU compiler for Renesas / SuperH SH.
-   Copyright (C) 1993-2017 Free Software Foundation, Inc.
+   Copyright (C) 1993-2018 Free Software Foundation, Inc.
    Contributed by Steve Chamberlain (sac@cygnus.com).
    Improved by Jim Wilson (wilson@cygnus.com).
 
@@ -88,7 +88,7 @@ extern int shl_sext_length (rtx);
 extern bool gen_shl_sext (rtx, rtx, rtx, rtx);
 extern int regs_used (rtx, int);
 extern void fixup_addr_diff_vecs (rtx_insn *);
-extern int get_dest_uid (rtx, int);
+extern int get_dest_uid (rtx_insn *, int);
 extern void final_prescan_insn (rtx_insn *, rtx *, int);
 extern enum tls_model tls_symbolic_operand (rtx, machine_mode);
 extern bool system_reg_operand (rtx, machine_mode);
@@ -120,10 +120,10 @@ struct set_of_reg
   rtx set_src;
 };
 
-/* Given a reg rtx and a start insn, try to find the insn that sets the
-   specified reg by using the specified insn stepping function, such as 
-   'prev_nonnote_insn_bb'.  When the insn is found, try to extract the rtx
-   of the reg set.  */
+/* Given a reg rtx and a start insn, try to find the insn that sets
+   the specified reg by using the specified insn stepping function,
+   such as 'prev_nonnote_nondebug_insn_bb'.  When the insn is found,
+   try to extract the rtx of the reg set.  */
 template <typename F> inline set_of_reg
 sh_find_set_of_reg (rtx reg, rtx_insn* insn, F stepfunc,
 		    bool ignore_reg_reg_copies = false)

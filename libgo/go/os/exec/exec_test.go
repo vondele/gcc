@@ -146,11 +146,11 @@ func TestCatGoodAndBadFile(t *testing.T) {
 	}
 }
 
-func TestNoExistBinary(t *testing.T) {
-	// Can't run a non-existent binary
-	err := exec.Command("/no-exist-binary").Run()
+func TestNoExistExecutable(t *testing.T) {
+	// Can't run a non-existent executable
+	err := exec.Command("/no-exist-executable").Run()
 	if err == nil {
-		t.Error("expected error from /no-exist-binary")
+		t.Error("expected error from /no-exist-executable")
 	}
 }
 
@@ -338,7 +338,7 @@ func TestPipeLookPathLeak(t *testing.T) {
 	}
 
 	for i := 0; i < 6; i++ {
-		cmd := exec.Command("something-that-does-not-exist-binary")
+		cmd := exec.Command("something-that-does-not-exist-executable")
 		cmd.StdoutPipe()
 		cmd.StderrPipe()
 		cmd.StdinPipe()
@@ -405,9 +405,21 @@ var testedAlreadyLeaked = false
 
 // basefds returns the number of expected file descriptors
 // to be present in a process at start.
-// stdin, stdout, stderr, epoll/kqueue
+// stdin, stdout, stderr, epoll/kqueue, maybe testlog
 func basefds() uintptr {
-	return os.Stderr.Fd() + 1
+	n := os.Stderr.Fd() + 1
+	// The poll (epoll/kqueue) descriptor can be numerically
+	// either between stderr and the testlog-fd, or after
+	// testlog-fd.
+	if poll.PollDescriptor() == n {
+		n++
+	}
+	for _, arg := range os.Args {
+		if strings.HasPrefix(arg, "-test.testlogfile=") {
+			n++
+		}
+	}
+	return n
 }
 
 func closeUnexpectedFds(t *testing.T, m string) {

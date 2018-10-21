@@ -1,5 +1,9 @@
 /* { dg-do compile } */
-/* { dg-options "-O2 -std=gnu++11 -fopt-info-loop-missed -Wunsafe-loop-optimizations" } */
+/* { dg-options "-O2 -std=gnu++11 -fopt-info-loop-missed" } */
+struct p
+{
+  char *ay;
+};
 
 namespace a {
 void b () __attribute__ ((__noreturn__));
@@ -19,7 +23,7 @@ template <typename j, typename> class k
   j l;
 
 public:
-  typename d<j>::f operator* () {}
+  typename d<j>::f operator* () { return p(); }
   void operator++ () { ++l; }
   j
   aa ()
@@ -33,7 +37,6 @@ operator!= (k<m, ab> o, k<n, ab> p2)
 {
   return o.aa () != p2.aa ();
 }
-struct p;
 namespace a {
 struct F
 {
@@ -75,18 +78,15 @@ at
 av (au o)
 {
   o.aq ('\n');
+  return at();
 }
 u ax;
 }
-struct p
-{
-  char *ay;
-};
 a::H t;
 void
 ShowHelpListCommands ()
 {
-  for (auto c : t) /* { dg-message "note: missed loop optimization: niters analysis .*" } */
+  for (auto c : t) /* { dg-missed "missed loop optimization: niters analysis .*" } */
     a::ax << c.ay << a::av;
 }
 

@@ -1,6 +1,6 @@
 /* Declarations for insn-output.c and other code to write to asm_out_file.
    These functions are defined in final.c, and varasm.c.
-   Copyright (C) 1987-2017 Free Software Foundation, Inc.
+   Copyright (C) 1987-2018 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -96,11 +96,7 @@ extern int insn_current_reference_address (rtx_insn *);
 
 /* Find the alignment associated with a CODE_LABEL.
    Defined in final.c.  */
-extern int label_to_alignment (rtx);
-
-/* Find the alignment maximum skip associated with a CODE_LABEL.
-   Defined in final.c.  */
-extern int label_to_max_skip (rtx);
+extern align_flags label_to_alignment (rtx);
 
 /* Output a LABEL_REF, or a bare CODE_LABEL, as an assembler symbol.  */
 extern void output_asm_label (rtx);
@@ -149,7 +145,7 @@ extern int only_leaf_regs_used (void);
 extern void leaf_renumber_regs_insn (rtx);
 
 /* Locate the proper template for the given insn-code.  */
-extern const char *get_insn_template (int, rtx);
+extern const char *get_insn_template (int, rtx_insn *);
 
 /* Functions in varasm.c.  */
 
@@ -307,11 +303,6 @@ extern void output_quoted_string (FILE *, const char *);
 
    This variable is defined  in final.c.  */
 extern rtx_sequence *final_sequence;
-
-/* The line number of the beginning of the current function.  Various
-   md code needs this so that it can output relative linenumbers.  */
-
-extern int sdb_begin_function_line;
 
 /* File in which assembler code is being written.  */
 
@@ -557,7 +548,7 @@ extern void output_file_directive (FILE *, const char *);
 extern unsigned int default_section_type_flags (tree, const char *, int);
 
 extern bool have_global_bss_p (void);
-extern bool bss_initializer_p (const_tree);
+extern bool bss_initializer_p (const_tree, bool = false);
 
 extern void default_no_named_section (const char *, unsigned int, tree);
 extern void default_elf_asm_named_section (const char *, unsigned int, tree);

@@ -1,5 +1,5 @@
 /* Header file for libgcov-*.c.
-   Copyright (C) 1996-2017 Free Software Foundation, Inc.
+   Copyright (C) 1996-2018 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -225,6 +225,15 @@ struct gcov_master
 {
   gcov_unsigned_t version;
   struct gcov_root *root;
+};
+
+struct indirect_call_tuple
+{
+  /* Callee function.  */
+  void *callee;
+
+  /* Pointer to counters.  */
+  gcov_type *counters;
 };
   
 /* Exactly one of these will be active in the process.  */

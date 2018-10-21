@@ -1,5 +1,5 @@
 /* Handle exceptional things in C++.
-   Copyright (C) 1989-2017 Free Software Foundation, Inc.
+   Copyright (C) 1989-2018 Free Software Foundation, Inc.
    Contributed by Michael Tiemann <tiemann@cygnus.com>
    Rewritten by Mike Stump <mrs@cygnus.com>, based upon an
    initial re-implementation courtesy Tad Hunt.
@@ -147,7 +147,7 @@ declare_library_fn (const char *name, tree rtype, tree ptype,
 		    int ecf, int tm_ecf)
 {
   tree ident = get_identifier (name);
-  tree res = IDENTIFIER_GLOBAL_VALUE (ident);
+  tree res = get_global_binding (ident);
   if (!res)
     {
       tree type = build_function_type_list (rtype, ptype, NULL_TREE);
@@ -158,7 +158,7 @@ declare_library_fn (const char *name, tree rtype, tree ptype,
 	  char *tm_name = concat ("_ITM_", name + 2, NULL_TREE);
 	  tree tm_ident = get_identifier (tm_name);
 	  free (tm_name);
-	  tree tm_fn = IDENTIFIER_GLOBAL_VALUE (tm_ident);
+	  tree tm_fn = get_global_binding (tm_ident);
 	  if (!tm_fn)
 	    tm_fn = push_library_fn (tm_ident, type, except, ecf | tm_ecf);
 	  record_tm_replacement (res, tm_fn);
@@ -301,12 +301,12 @@ initialize_handler_parm (tree decl, tree exp)
      adjusted by value from __cxa_begin_catch.  Others are returned by
      reference.  */
   init_type = TREE_TYPE (decl);
-  if (!POINTER_TYPE_P (init_type))
+  if (!INDIRECT_TYPE_P (init_type))
     init_type = build_reference_type (init_type);
 
   /* Since pointers are passed by value, initialize a reference to
      pointer catch parm with the address of the temporary.  */
-  if (TREE_CODE (init_type) == REFERENCE_TYPE
+  if (TYPE_REF_P (init_type)
       && TYPE_PTR_P (TREE_TYPE (init_type)))
     exp = cp_build_addr_expr (exp, tf_warning_or_error);
 
@@ -577,7 +577,7 @@ build_throw (tree exp)
       return exp;
     }
 
-  if (exp == null_node)
+  if (exp && null_node_p (exp))
     warning (0, "throwing NULL, which has integral, not pointer type");
 
   if (exp != NULL_TREE)
@@ -609,7 +609,7 @@ build_throw (tree exp)
       if (!throw_fn)
 	{
 	  tree name = get_identifier ("__cxa_throw");
-	  throw_fn = IDENTIFIER_GLOBAL_VALUE (name);
+	  throw_fn = get_global_binding (name);
 	  if (!throw_fn)
 	    {
 	      /* Declare void __cxa_throw (void*, void*, void (*)(void*)).  */
@@ -622,7 +622,7 @@ build_throw (tree exp)
 	      if (flag_tm)
 		{
 		  tree itm_name = get_identifier ("_ITM_cxa_throw");
-		  tree itm_fn = IDENTIFIER_GLOBAL_VALUE (itm_name);
+		  tree itm_fn = get_global_binding (itm_name);
 		  if (!itm_fn)
 		    itm_fn = push_throw_library_fn (itm_name, tmp);
 		  apply_tm_attr (itm_fn, get_identifier ("transaction_pure"));
@@ -664,7 +664,7 @@ build_throw (tree exp)
       CLEANUP_EH_ONLY (allocate_expr) = 1;
 
       object = build_nop (build_pointer_type (temp_type), ptr);
-      object = cp_build_indirect_ref (object, RO_NULL, tf_warning_or_error);
+      object = cp_build_fold_indirect_ref (object);
 
       /* And initialize the exception object.  */
       if (CLASS_TYPE_P (temp_type))
@@ -676,12 +676,9 @@ build_throw (tree exp)
 	  /* Under C++0x [12.8/16 class.copy], a thrown lvalue is sometimes
 	     treated as an rvalue for the purposes of overload resolution
 	     to favor move constructors over copy constructors.  */
-	  if (/* Must be a local, automatic variable.  */
-	      VAR_P (exp)
-	      && DECL_CONTEXT (exp) == current_function_decl
-	      && ! TREE_STATIC (exp)
+	  if (treat_lvalue_as_rvalue_p (exp, /*parm_ok*/false)
 	      /* The variable must not have the `volatile' qualifier.  */
-	      && !(cp_type_quals (TREE_TYPE (exp)) & TYPE_QUAL_VOLATILE))
+	      && !CP_TYPE_VOLATILE_P (TREE_TYPE (exp)))
 	    {
 	      tree moved = move (exp);
 	      exp_vec = make_tree_vector_single (moved);
@@ -764,7 +761,7 @@ build_throw (tree exp)
       if (!rethrow_fn)
 	{
 	  tree name = get_identifier ("__cxa_rethrow");
-	  rethrow_fn = IDENTIFIER_GLOBAL_VALUE (name);
+	  rethrow_fn = get_global_binding (name);
 	  if (!rethrow_fn)
 	    /* Declare void __cxa_rethrow (void).  */
 	    rethrow_fn = push_throw_library_fn
@@ -802,7 +799,7 @@ complete_ptr_ref_or_void_ptr_p (tree type, tree from)
 
   /* Or a pointer or ref to one, or cv void *.  */
   is_ptr = TYPE_PTR_P (type);
-  if (is_ptr || TREE_CODE (type) == REFERENCE_TYPE)
+  if (is_ptr || TYPE_REF_P (type))
     {
       tree core = TREE_TYPE (type);
 
@@ -846,7 +843,7 @@ is_admissible_throw_operand_or_catch_parameter (tree t, bool is_throw)
   else if (abstract_virtuals_error (is_throw ? ACU_THROW : ACU_CATCH, type))
     return false;
   else if (!is_throw
-	   && TREE_CODE (type) == REFERENCE_TYPE
+	   && TYPE_REF_P (type)
 	   && TYPE_REF_IS_RVALUE (type))
     {
       error ("cannot declare catch parameter to be of rvalue "
@@ -1024,7 +1021,7 @@ check_noexcept_r (tree *tp, int * /*walk_subtrees*/, void * /*data*/)
          We could use TREE_NOTHROW (t) for !TREE_PUBLIC fns, though... */
       tree fn = cp_get_callee (t);
       tree type = TREE_TYPE (fn);
-      gcc_assert (POINTER_TYPE_P (type));
+      gcc_assert (INDIRECT_TYPE_P (type));
       type = TREE_TYPE (type);
 
       STRIP_NOPS (fn);
@@ -1190,15 +1187,18 @@ type_throw_all_p (const_tree type)
    constant-expression of EXPR.  COMPLAIN is as for tsubst.  */
 
 tree
-build_noexcept_spec (tree expr, int complain)
+build_noexcept_spec (tree expr, tsubst_flags_t complain)
 {
   /* This isn't part of the signature, so don't bother trying to evaluate
      it until instantiation.  */
-  if (!processing_template_decl && TREE_CODE (expr) != DEFERRED_NOEXCEPT)
+  if (TREE_CODE (expr) != DEFERRED_NOEXCEPT
+      && (!processing_template_decl
+	  || (flag_noexcept_type && !value_dependent_expression_p (expr))))
     {
       expr = perform_implicit_conversion_flags (boolean_type_node, expr,
 						complain,
 						LOOKUP_NORMAL);
+      expr = instantiate_non_dependent_expr (expr);
       expr = cxx_constant_value (expr);
     }
   if (TREE_CODE (expr) == INTEGER_CST)
@@ -1217,6 +1217,10 @@ build_noexcept_spec (tree expr, int complain)
     {
       gcc_assert (processing_template_decl
 		  || TREE_CODE (expr) == DEFERRED_NOEXCEPT);
+      if (TREE_CODE (expr) != DEFERRED_NOEXCEPT)
+	/* Avoid problems with a function type built with a dependent typedef
+	   being reused in another scope (c++/84045).  */
+	expr = strip_typedefs_expr (expr);
       return build_tree_list (expr, NULL_TREE);
     }
 }

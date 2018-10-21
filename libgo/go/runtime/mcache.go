@@ -37,7 +37,6 @@ type mcache struct {
 	alloc [numSpanClasses]*mspan // spans to allocate from, indexed by spanClass
 
 	// Local allocator stats, flushed during GC.
-	local_nlookup    uintptr                  // number of pointer lookups
 	local_largefree  uintptr                  // bytes freed for large objects (>maxsmallsize)
 	local_nlargefree uintptr                  // number of frees for large objects (>maxsmallsize)
 	local_nsmallfree [_NumSizeClasses]uintptr // number of frees for small objects (<=maxsmallsize)
@@ -96,7 +95,7 @@ func freemcache(c *mcache) {
 
 // Gets a span that has a free object in it and assigns it
 // to be the cached span for the given sizeclass. Returns this span.
-func (c *mcache) refill(spc spanClass) *mspan {
+func (c *mcache) refill(spc spanClass) {
 	_g_ := getg()
 
 	_g_.m.locks++
@@ -123,7 +122,6 @@ func (c *mcache) refill(spc spanClass) *mspan {
 
 	c.alloc[spc] = s
 	_g_.m.locks--
-	return s
 }
 
 func (c *mcache) releaseAll() {

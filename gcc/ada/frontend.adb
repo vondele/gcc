@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 B o d y                                  --
 --                                                                          --
---          Copyright (C) 1992-2017, Free Software Foundation, Inc.         --
+--          Copyright (C) 1992-2018, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -38,7 +38,7 @@ with Ghost;    use Ghost;
 with Inline;   use Inline;
 with Lib;      use Lib;
 with Lib.Load; use Lib.Load;
-with Lib.Xref; use Lib.Xref;
+with Lib.Xref;
 with Live;     use Live;
 with Namet;    use Namet;
 with Nlists;   use Nlists;
@@ -49,21 +49,21 @@ with Prep;
 with Prepcomp;
 with Restrict; use Restrict;
 with Rident;   use Rident;
-with Rtsfind;  use Rtsfind;
+with Rtsfind;
 with Snames;   use Snames;
 with Sprint;
 with Scn;      use Scn;
 with Sem;      use Sem;
 with Sem_Aux;
-with Sem_Ch8;  use Sem_Ch8;
+with Sem_Ch8;
 with Sem_SCIL;
 with Sem_Elab; use Sem_Elab;
 with Sem_Prag; use Sem_Prag;
-with Sem_Warn; use Sem_Warn;
+with Sem_Warn;
 with Sinfo;    use Sinfo;
 with Sinput;   use Sinput;
 with Sinput.L; use Sinput.L;
-with SCIL_LL;  use SCIL_LL;
+with SCIL_LL;
 with Tbuild;   use Tbuild;
 with Types;    use Types;
 
@@ -87,6 +87,7 @@ begin
    Checks.Initialize;
    Sem_Warn.Initialize;
    Prep.Initialize;
+   Sem_Elab.Initialize;
 
    if Generate_SCIL then
       SCIL_LL.Initialize;
@@ -126,7 +127,7 @@ begin
 
    --  Return immediately if the main source could not be found
 
-   if Sinput.Main_Source_File = No_Source_File then
+   if Sinput.Main_Source_File <= No_Source_File then
       return;
    end if;
 
@@ -167,7 +168,7 @@ begin
 
          --  Case of gnat.adc file present
 
-         if Source_gnat_adc /= No_Source_File then
+         if Source_gnat_adc > No_Source_File then
 
             --  Parse the gnat.adc file for configuration pragmas
 
@@ -214,7 +215,7 @@ begin
 
                   Source_Config_File := Load_Config_File (Config_Name);
 
-                  if Source_Config_File = No_Source_File then
+                  if Source_Config_File <= No_Source_File then
                      Osint.Fail
                        ("cannot find configuration pragmas file "
                         & Config_File_Names (Index).all);
@@ -302,7 +303,7 @@ begin
       --  capture the values of the configuration switches (see Opt for further
       --  details).
 
-      Opt.Register_Opt_Config_Switches;
+      Register_Config_Switches;
 
       --  Check for file which contains No_Body pragma
 
@@ -423,8 +424,9 @@ begin
                Instantiate_Bodies;
             end if;
 
-            --  Analyze inlined bodies and check elaboration rules in GNATprove
-            --  mode as well as during compilation.
+            --  Analyze all inlined bodies, check access-before-elaboration
+            --  rules, and remove ignored Ghost code when generating code or
+            --  compiling for GNATprove.
 
             if Operating_Mode = Generate_Code or else GNATprove_Mode then
                if Inline_Processing_Required then
@@ -438,17 +440,30 @@ begin
                   Collect_Garbage_Entities;
                end if;
 
-               Check_Elab_Calls;
+               if Legacy_Elaboration_Checks then
+                  Check_Elab_Calls;
+               end if;
 
-               --  Remove any ignored Ghost code as it must not appear in the
-               --  executable.
+               --  Examine all top level scenarios collected during analysis
+               --  and resolution. Diagnose conditional ABEs, install run-time
+               --  checks to catch conditional ABEs, and guarantee the prior
+               --  elaboration of external units.
 
-               Remove_Ignored_Ghost_Code;
+               Check_Elaboration_Scenarios;
+
+            --  Examine all top level scenarios collected during analysis and
+            --  resolution in order to diagnose conditional ABEs, even in the
+            --  presence of serious errors.
+
+            else
+               Check_Elaboration_Scenarios;
             end if;
 
             --  At this stage we can unnest subprogram bodies if required
 
-            Exp_Unst.Unnest_Subprograms (Cunit (Main_Unit));
+            if Total_Errors_Detected = 0 then
+               Exp_Unst.Unnest_Subprograms (Cunit (Main_Unit));
+            end if;
 
             --  List library units if requested
 
@@ -463,6 +478,14 @@ begin
             Sem_Warn.Output_Unreferenced_Messages;
             Sem_Warn.Check_Unused_Withs;
             Sem_Warn.Output_Unused_Warnings_Off_Warnings;
+
+            --  Remove any ignored Ghost code as it must not appear in the
+            --  executable. This action must be performed last because it
+            --  heavily alters the tree.
+
+            if Operating_Mode = Generate_Code or else GNATprove_Mode then
+               Remove_Ignored_Ghost_Code;
+            end if;
          end if;
       end if;
    end;

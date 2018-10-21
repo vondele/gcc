@@ -1,5 +1,5 @@
 /* Convert tree expression to rtl instructions, for GNU compiler.
-   Copyright (C) 1988-2017 Free Software Foundation, Inc.
+   Copyright (C) 1988-2018 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -38,6 +38,8 @@ along with GCC; see the file COPYING3.  If not see
 #include "langhooks.h"
 
 static bool prefer_and_bit_test (scalar_int_mode, int);
+static void do_jump (tree, rtx_code_label *, rtx_code_label *,
+		     profile_probability);
 static void do_jump_by_parts_greater (scalar_int_mode, tree, tree, int,
 				      rtx_code_label *, rtx_code_label *,
 				      profile_probability);
@@ -89,8 +91,8 @@ do_pending_stack_adjust (void)
 {
   if (inhibit_defer_pop == 0)
     {
-      if (pending_stack_adjust != 0)
-        adjust_stack (GEN_INT (pending_stack_adjust));
+      if (maybe_ne (pending_stack_adjust, 0))
+	adjust_stack (gen_int_mode (pending_stack_adjust, Pmode));
       pending_stack_adjust = 0;
     }
 }
@@ -118,38 +120,6 @@ restore_pending_stack_adjust (saved_pending_stack_adjust *save)
     }
 }
 
-/* Expand conditional expressions.  */
-
-/* Generate code to evaluate EXP and jump to LABEL if the value is zero.  */
-
-void
-jumpifnot (tree exp, rtx_code_label *label, profile_probability prob)
-{
-  do_jump (exp, label, NULL, prob.invert ());
-}
-
-void
-jumpifnot_1 (enum tree_code code, tree op0, tree op1, rtx_code_label *label,
-	     profile_probability prob)
-{
-  do_jump_1 (code, op0, op1, label, NULL, prob.invert ());
-}
-
-/* Generate code to evaluate EXP and jump to LABEL if the value is nonzero.  */
-
-void
-jumpif (tree exp, rtx_code_label *label, profile_probability prob)
-{
-  do_jump (exp, NULL, label, prob);
-}
-
-void
-jumpif_1 (enum tree_code code, tree op0, tree op1,
-	  rtx_code_label *label, profile_probability prob)
-{
-  do_jump_1 (code, op0, op1, NULL, label, prob);
-}
-
 /* Used internally by prefer_and_bit_test.  */
 
 static GTY(()) rtx and_reg;
@@ -197,7 +167,7 @@ prefer_and_bit_test (scalar_int_mode mode, int bitnum)
    OP0 CODE OP1 .  IF_FALSE_LABEL and IF_TRUE_LABEL like in do_jump.
    PROB is probability of jump to if_true_label.  */
 
-void
+static void
 do_jump_1 (enum tree_code code, tree op0, tree op1,
 	   rtx_code_label *if_false_label, rtx_code_label *if_true_label,
 	   profile_probability prob)
@@ -347,13 +317,11 @@ do_jump_1 (enum tree_code code, tree op0, tree op1,
         profile_probability op1_prob = profile_probability::uninitialized ();
         if (prob.initialized_p ())
           {
-            profile_probability false_prob = prob.invert ();
-            profile_probability op0_false_prob = false_prob.apply_scale (1, 2);
-	    profile_probability op1_false_prob = false_prob.apply_scale (1, 2)
-				/ op0_false_prob.invert ();
+	    op1_prob = prob.invert ();
+	    op0_prob = op1_prob.split (profile_probability::even ());
             /* Get the probability that each jump below is true.  */
-            op0_prob = op0_false_prob.invert ();
-            op1_prob = op1_false_prob.invert ();
+	    op0_prob = op0_prob.invert ();
+	    op1_prob = op1_prob.invert ();
           }
 	if (if_false_label == NULL)
           {
@@ -380,8 +348,8 @@ do_jump_1 (enum tree_code code, tree op0, tree op1,
         profile_probability op1_prob = profile_probability::uninitialized ();
         if (prob.initialized_p ())
           {
-            op0_prob = prob.apply_scale (1, 2);
-            op1_prob = prob.apply_scale (1, 2) / op0_prob.invert ();
+	    op1_prob = prob;
+	    op0_prob = op1_prob.split (profile_probability::even ());
 	  }
 	if (if_true_label == NULL)
 	  {
@@ -419,7 +387,7 @@ do_jump_1 (enum tree_code code, tree op0, tree op1,
 
    PROB is probability of jump to if_true_label.  */
 
-void
+static void
 do_jump (tree exp, rtx_code_label *if_false_label,
 	 rtx_code_label *if_true_label, profile_probability prob)
 {
@@ -469,6 +437,7 @@ do_jump (tree exp, rtx_code_label *if_false_label,
       /* FALLTHRU */
     case NON_LVALUE_EXPR:
     case ABS_EXPR:
+    case ABSU_EXPR:
     case NEGATE_EXPR:
     case LROTATE_EXPR:
     case RROTATE_EXPR:
@@ -947,6 +916,43 @@ split_comparison (enum rtx_code code, machine_mode mode,
     }
 }
 
+/* Generate code to evaluate EXP and jump to LABEL if the value is nonzero.
+   PROB is probability of jump to LABEL.  */
+
+void
+jumpif (tree exp, rtx_code_label *label, profile_probability prob)
+{
+  do_jump (exp, NULL, label, prob);
+}
+
+/* Similar to jumpif but dealing with exploded comparisons of the type
+   OP0 CODE OP1 .  LABEL and PROB are like in jumpif.  */
+
+void
+jumpif_1 (enum tree_code code, tree op0, tree op1, rtx_code_label *label,
+	  profile_probability prob)
+{
+  do_jump_1 (code, op0, op1, NULL, label, prob);
+}
+
+/* Generate code to evaluate EXP and jump to LABEL if the value is zero.
+   PROB is probability of jump to LABEL.  */
+
+void
+jumpifnot (tree exp, rtx_code_label *label, profile_probability prob)
+{
+  do_jump (exp, label, NULL, prob.invert ());
+}
+
+/* Similar to jumpifnot but dealing with exploded comparisons of the type
+   OP0 CODE OP1 .  LABEL and PROB are like in jumpifnot.  */
+
+void
+jumpifnot_1 (enum tree_code code, tree op0, tree op1, rtx_code_label *label,
+	     profile_probability prob)
+{
+  do_jump_1 (code, op0, op1, label, NULL, prob.invert ());
+}
 
 /* Like do_compare_and_jump but expects the values to compare as two rtx's.
    The decision as to signed or unsigned comparison must be made by the caller.
@@ -1002,8 +1008,8 @@ do_compare_rtx_and_jump (rtx op0, rtx op1, enum rtx_code code, int unsignedp,
   do_pending_stack_adjust ();
 
   code = unsignedp ? unsigned_condition (code) : code;
-  if (0 != (tem = simplify_relational_operation (code, mode, VOIDmode,
-						 op0, op1)))
+  if ((tem = simplify_relational_operation (code, mode, VOIDmode,
+					    op0, op1)) != 0)
     {
       if (CONSTANT_P (tem))
 	{
@@ -1120,16 +1126,27 @@ do_compare_rtx_and_jump (rtx op0, rtx op1, enum rtx_code code, int unsignedp,
 
 	  else
 	    {
-	      profile_probability first_prob = prob;
+	      profile_probability cprob
+		= profile_probability::guessed_always ();
 	      if (first_code == UNORDERED)
-		first_prob = profile_probability::guessed_always ().apply_scale
-				 (1, 100);
+		cprob = cprob.apply_scale (1, 100);
 	      else if (first_code == ORDERED)
-		first_prob = profile_probability::guessed_always ().apply_scale
-				 (99, 100);
+		cprob = cprob.apply_scale (99, 100);
+	      else
+		cprob = profile_probability::even ();
+	      /* We want to split:
+		 if (x) goto t; // prob;
+		 into
+		 if (a) goto t; // first_prob;
+		 if (b) goto t; // prob;
+		 such that the overall probability of jumping to t
+		 remains the same and first_prob is prob * cprob.  */
 	      if (and_them)
 		{
 		  rtx_code_label *dest_label;
+		  prob = prob.invert ();
+		  profile_probability first_prob = prob.split (cprob).invert ();
+		  prob = prob.invert ();
 		  /* If we only jump if true, just bypass the second jump.  */
 		  if (! if_false_label)
 		    {
@@ -1143,8 +1160,11 @@ do_compare_rtx_and_jump (rtx op0, rtx op1, enum rtx_code code, int unsignedp,
 					   size, dest_label, NULL, first_prob);
 		}
               else
-                do_compare_rtx_and_jump (op0, op1, first_code, unsignedp, mode,
-					 size, NULL, if_true_label, first_prob);
+		{
+		  profile_probability first_prob = prob.split (cprob);
+		  do_compare_rtx_and_jump (op0, op1, first_code, unsignedp, mode,
+					   size, NULL, if_true_label, first_prob);
+		}
 	    }
 	}
 
@@ -1202,15 +1222,15 @@ do_compare_and_jump (tree treeop0, tree treeop1, enum rtx_code signed_code,
   code = unsignedp ? unsigned_code : signed_code;
 
   /* If function pointers need to be "canonicalized" before they can
-     be reliably compared, then canonicalize them.
-     Only do this if *both* sides of the comparison are function pointers.
-     If one side isn't, we want a noncanonicalized comparison.  See PR
-     middle-end/17564.  */
+     be reliably compared, then canonicalize them.  Canonicalize the
+     expression when one of the operands is a function pointer.  This
+     handles the case where the other operand is a void pointer.  See
+     PR middle-end/17564.  */
   if (targetm.have_canonicalize_funcptr_for_compare ()
-      && POINTER_TYPE_P (TREE_TYPE (treeop0))
-      && POINTER_TYPE_P (TREE_TYPE (treeop1))
-      && FUNC_OR_METHOD_TYPE_P (TREE_TYPE (TREE_TYPE (treeop0)))
-      && FUNC_OR_METHOD_TYPE_P (TREE_TYPE (TREE_TYPE (treeop1))))
+      && ((POINTER_TYPE_P (TREE_TYPE (treeop0))
+	   && FUNC_OR_METHOD_TYPE_P (TREE_TYPE (TREE_TYPE (treeop0))))
+	  || (POINTER_TYPE_P (TREE_TYPE (treeop1))
+	      && FUNC_OR_METHOD_TYPE_P (TREE_TYPE (TREE_TYPE (treeop1))))))
     {
       rtx new_op0 = gen_reg_rtx (mode);
       rtx new_op1 = gen_reg_rtx (mode);

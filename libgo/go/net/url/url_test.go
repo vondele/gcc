@@ -568,6 +568,28 @@ var urltests = []URLTest{
 		},
 		"",
 	},
+	// test we can roundtrip magnet url
+	// fix issue https://golang.org/issue/20054
+	{
+		"magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88a&dn",
+		&URL{
+			Scheme:   "magnet",
+			Host:     "",
+			Path:     "",
+			RawQuery: "xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88a&dn",
+		},
+		"magnet:?xt=urn:btih:c12fe1c06bba254a9dc9f519b335aa7c1367a88a&dn",
+	},
+	{
+		"mailto:?subject=hi",
+		&URL{
+			Scheme:   "mailto",
+			Host:     "",
+			Path:     "",
+			RawQuery: "subject=hi",
+		},
+		"mailto:?subject=hi",
+	},
 }
 
 // more useful string for debugging than fmt's struct printer
@@ -1010,6 +1032,10 @@ var resolveReferenceTests = []struct {
 	{"http://foo.com/bar?a=b", "/baz?", "http://foo.com/baz?"},
 	{"http://foo.com/bar?a=b", "/baz?c=d", "http://foo.com/baz?c=d"},
 
+	// Multiple slashes
+	{"http://foo.com/bar", "http://foo.com//baz", "http://foo.com//baz"},
+	{"http://foo.com/bar", "http://foo.com///baz/quux", "http://foo.com///baz/quux"},
+
 	// Scheme-relative
 	{"https://foo.com/bar?a=b", "//bar.com/quux", "https://bar.com/quux"},
 
@@ -1049,6 +1075,7 @@ var resolveReferenceTests = []struct {
 
 	// Fragment
 	{"http://foo.com/bar", ".#frag", "http://foo.com/#frag"},
+	{"http://example.org/", "#!$&%27()*+,;=", "http://example.org/#!$&%27()*+,;="},
 
 	// Paths with escaping (issue 16947).
 	{"http://foo.com/foo%2fbar/", "../baz", "http://foo.com/baz"},
@@ -1407,8 +1434,8 @@ func TestParseErrors(t *testing.T) {
 		{"mysql://x@y(1.2.3.4:123)/foo", false},
 
 		{"http://[]%20%48%54%54%50%2f%31%2e%31%0a%4d%79%48%65%61%64%65%72%3a%20%31%32%33%0a%0a/", true}, // golang.org/issue/11208
-		{"http://a b.com/", true},                                                                       // no space in host name please
-		{"cache_object://foo", true},                                                                    // scheme cannot have _, relative path cannot have : in first segment
+		{"http://a b.com/", true},    // no space in host name please
+		{"cache_object://foo", true}, // scheme cannot have _, relative path cannot have : in first segment
 		{"cache_object:foo", true},
 		{"cache_object:foo/bar", true},
 		{"cache_object/:foo/bar", false},
@@ -1681,5 +1708,38 @@ func TestGob(t *testing.T) {
 	}
 	if u1.String() != u.String() {
 		t.Errorf("json decoded to: %s\nwant: %s\n", u1, u)
+	}
+}
+
+func TestNilUser(t *testing.T) {
+	defer func() {
+		if v := recover(); v != nil {
+			t.Fatalf("unexpected panic: %v", v)
+		}
+	}()
+
+	u, err := Parse("http://foo.com/")
+
+	if err != nil {
+		t.Fatalf("parse err: %v", err)
+	}
+
+	if v := u.User.Username(); v != "" {
+		t.Fatalf("expected empty username, got %s", v)
+	}
+
+	if v, ok := u.User.Password(); v != "" || ok {
+		t.Fatalf("expected empty password, got %s (%v)", v, ok)
+	}
+
+	if v := u.User.String(); v != "" {
+		t.Fatalf("expected empty string, got %s", v)
+	}
+}
+
+func TestInvalidUserPassword(t *testing.T) {
+	_, err := Parse("http://us\ner:pass\nword@foo.com/")
+	if got, wantsub := fmt.Sprint(err), "net/url: invalid userinfo"; !strings.Contains(got, wantsub) {
+		t.Errorf("error = %q; want substring %q", got, wantsub)
 	}
 }

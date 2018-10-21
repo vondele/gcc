@@ -1,5 +1,5 @@
 /* IPA visibility pass
-   Copyright (C) 2003-2017 Free Software Foundation, Inc.
+   Copyright (C) 2003-2018 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -203,7 +203,7 @@ cgraph_externally_visible_p (struct cgraph_node *node,
      using the implicit built-in declarations anymore.  Similarly this enables
      us to remove them as unreachable before actual calls may appear during
      expansion or folding.  */
-  if (DECL_BUILT_IN (node->decl))
+  if (fndecl_built_in_p (node->decl))
     return true;
 
   /* If linker counts on us, we must preserve the function.  */
@@ -243,10 +243,6 @@ cgraph_externally_visible_p (struct cgraph_node *node,
     return true;
 
   if (MAIN_NAME_P (DECL_NAME (node->decl)))
-    return true;
-
-  if (node->instrumentation_clone
-      && MAIN_NAME_P (DECL_NAME (node->orig_decl)))
     return true;
 
   return false;
@@ -623,7 +619,8 @@ function_and_variable_visibility (bool whole_program)
     {
       if (node->get_availability () != AVAIL_INTERPOSABLE
 	  || DECL_EXTERNAL (node->decl)
-	  || node->has_aliases_p ())
+	  || node->has_aliases_p ()
+	  || lookup_attribute ("noipa", DECL_ATTRIBUTES (node->decl)))
 	continue;
 
       cgraph_node *alias = 0;

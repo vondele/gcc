@@ -1,6 +1,6 @@
 // Predefined symbols and macros -*- C++ -*-
 
-// Copyright (C) 1997-2017 Free Software Foundation, Inc.
+// Copyright (C) 1997-2018 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
 // software; you can redistribute it and/or modify it under the
@@ -24,7 +24,7 @@
 
 /** @file bits/c++config.h
  *  This is an internal header file, included by other library headers.
- *  Do not attempt to use it directly. @headername{iosfwd}
+ *  Do not attempt to use it directly. @headername{version}
  */
 
 #ifndef _GLIBCXX_CXX_CONFIG_H
@@ -77,6 +77,7 @@
 // Macros for deprecated attributes.
 //   _GLIBCXX_USE_DEPRECATED
 //   _GLIBCXX_DEPRECATED
+//   _GLIBCXX17_DEPRECATED
 #ifndef _GLIBCXX_USE_DEPRECATED
 # define _GLIBCXX_USE_DEPRECATED 1
 #endif
@@ -85,6 +86,12 @@
 # define _GLIBCXX_DEPRECATED __attribute__ ((__deprecated__))
 #else
 # define _GLIBCXX_DEPRECATED
+#endif
+
+#if defined(__DEPRECATED) && (__cplusplus >= 201703L)
+# define _GLIBCXX17_DEPRECATED [[__deprecated__]]
+#else
+# define _GLIBCXX17_DEPRECATED
 #endif
 
 // Macros for ABI tag attributes.
@@ -115,15 +122,23 @@
 #endif
 
 #ifndef _GLIBCXX17_CONSTEXPR
-# if __cplusplus > 201402L
+# if __cplusplus >= 201703L
 #  define _GLIBCXX17_CONSTEXPR constexpr
 # else
 #  define _GLIBCXX17_CONSTEXPR
 # endif
 #endif
 
+#ifndef _GLIBCXX20_CONSTEXPR
+# if __cplusplus > 201703L
+#  define _GLIBCXX20_CONSTEXPR constexpr
+# else
+#  define _GLIBCXX20_CONSTEXPR
+# endif
+#endif
+
 #ifndef _GLIBCXX17_INLINE
-# if __cplusplus > 201402L
+# if __cplusplus >= 201703L
 #  define _GLIBCXX17_INLINE inline
 # else
 #  define _GLIBCXX17_INLINE
@@ -431,7 +446,7 @@ namespace std
 {
   // Avoid the use of assert, because we're trying to keep the <cassert>
   // include out of the mix.
-  inline void
+  extern "C++" inline void
   __replacement_assert(const char* __file, int __line,
 		       const char* __function, const char* __condition)
   {
@@ -528,7 +543,7 @@ namespace std
 // Most of the following conditions are due to limitations in the current
 // implementation.
 #if __cplusplus >= 201103L && _GLIBCXX_USE_CXX11_ABI			\
-  && _GLIBCXX_USE_DUAL_ABI && __cpp_transactional_memory >= 201505L	\
+  && _GLIBCXX_USE_DUAL_ABI && __cpp_transactional_memory >= 201500L	\
   &&  !_GLIBCXX_FULLY_DYNAMIC_STRING && _GLIBCXX_USE_WEAK_REF		\
   && _GLIBCXX_USE_ALLOCATOR_NEW
 #define _GLIBCXX_TXN_SAFE transaction_safe
@@ -601,5 +616,28 @@ namespace std
 # define _GLIBCXX_USE_C99_WCHAR _GLIBCXX98_USE_C99_WCHAR
 # endif
 #endif
+
+/* Define if __float128 is supported on this host. */
+#if defined(__FLOAT128__) || defined(__SIZEOF_FLOAT128__)
+#define _GLIBCXX_USE_FLOAT128
+#endif
+
+#if __GNUC__ >= 7
+// Assume these are available if the compiler claims to be a recent GCC:
+# define _GLIBCXX_HAVE_BUILTIN_HAS_UNIQ_OBJ_REP 1
+# define _GLIBCXX_HAVE_BUILTIN_IS_AGGREGATE 1
+# define _GLIBCXX_HAVE_BUILTIN_LAUNDER 1
+#elif defined(__is_identifier)
+// For non-GNU compilers:
+# if ! __is_identifier(__has_unique_object_representations)
+#  define _GLIBCXX_HAVE_BUILTIN_HAS_UNIQ_OBJ_REP 1
+# endif
+# if ! __is_identifier(__is_aggregate)
+#  define _GLIBCXX_HAVE_BUILTIN_IS_AGGREGATE 1
+# endif
+# if ! __is_identifier(__builtin_launder)
+#  define _GLIBCXX_HAVE_BUILTIN_LAUNDER 1
+# endif
+#endif // GCC
 
 // End of prewritten config; the settings discovered at configure time follow.

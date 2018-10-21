@@ -12,7 +12,6 @@ package net
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
-#include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
 */
@@ -24,7 +23,7 @@ import (
 )
 
 //extern getaddrinfo
-func libc_getaddrinfo(node *byte, service *byte, hints *syscall.Addrinfo, res **syscall.Addrinfo) int
+func libc_getaddrinfo(node *byte, service *byte, hints *syscall.Addrinfo, res **syscall.Addrinfo) int32
 
 //extern freeaddrinfo
 func libc_freeaddrinfo(res *syscall.Addrinfo)
@@ -279,7 +278,7 @@ func cgoLookupPTR(ctx context.Context, addr string) (names []string, err error, 
 	var zone string
 	ip := parseIPv4(addr)
 	if ip == nil {
-		ip, zone = parseIPv6(addr, true)
+		ip, zone = parseIPv6Zone(addr)
 	}
 	if ip == nil {
 		return nil, &DNSError{Err: "invalid address", Name: addr}, true

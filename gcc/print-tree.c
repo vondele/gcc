@@ -1,5 +1,5 @@
 /* Prints out tree in human readable form - GCC
-   Copyright (C) 1990-2017 Free Software Foundation, Inc.
+   Copyright (C) 1990-2018 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -50,6 +50,71 @@ dump_addr (FILE *file, const char *prefix, const void *addr)
     fprintf (file, "%s#", prefix);
   else
     fprintf (file, "%s" HOST_PTR_PRINTF, prefix, addr);
+}
+
+/* Print to FILE a NODE representing a REAL_CST constant, including
+   Infinity and NaN.  Be verbose when BFRIEF is false.  */
+
+static void
+print_real_cst (FILE *file, const_tree node, bool brief)
+{
+  if (TREE_OVERFLOW (node))
+    fprintf (file, " overflow");
+
+  REAL_VALUE_TYPE d = TREE_REAL_CST (node);
+  if (REAL_VALUE_ISINF (d))
+    fprintf (file,  REAL_VALUE_NEGATIVE (d) ? " -Inf" : " Inf");
+  else if (REAL_VALUE_ISNAN (d))
+    {
+      /* Print a NaN in the format [-][Q]NaN[(significand[exponent])]
+	 where significand is a hexadecimal string that starts with
+	 the 0x prefix followed by 0 if the number is not canonical
+	 and a non-zero digit if it is, and exponent is decimal.  */
+      unsigned start = 0;
+      const char *psig = (const char *) d.sig;
+      for (unsigned i = 0; i != sizeof d.sig; ++i)
+	if (psig[i])
+	  {
+	    start = i;
+	    break;
+	  }
+
+      fprintf (file, " %s%sNaN", d.sign ? "-" : "",
+	       d.signalling ? "S" : "Q");
+
+      if (brief)
+	return;
+
+      if (start)
+	fprintf (file, "(0x%s", d.canonical ? "" : "0");
+      else if (d.uexp)
+	fprintf (file, "(%s", d.canonical ? "" : "0");
+      else if (!d.canonical)
+	{
+	  fprintf (file, "(0)");
+	  return;
+	}
+
+      if (psig[start])
+	{
+	  for (unsigned i = start; i != sizeof d.sig; ++i)
+	    if (i == start)
+	      fprintf (file, "%x", psig[i]);
+	    else
+	      fprintf (file, "%02x", psig[i]);
+	}
+
+      if (d.uexp)
+	fprintf (file, "%se%u)", psig[start] ? "," : "", d.uexp);
+      else if (psig[start])
+	fputc (')', file);
+    }
+  else
+    {
+      char string[64];
+      real_to_decimal (string, &d, sizeof (string), 0, 1);
+      fprintf (file, " %s", string);
+    }
 }
 
 /* Print a node in brief fashion, with just the code, address and name.  */
@@ -118,27 +183,10 @@ print_node_brief (FILE *file, const char *prefix, const_tree node, int indent)
 	fprintf (file, " overflow");
 
       fprintf (file, " ");
-      print_dec (node, file, TYPE_SIGN (TREE_TYPE (node)));
+      print_dec (wi::to_wide (node), file, TYPE_SIGN (TREE_TYPE (node)));
     }
   if (TREE_CODE (node) == REAL_CST)
-    {
-      REAL_VALUE_TYPE d;
-
-      if (TREE_OVERFLOW (node))
-	fprintf (file, " overflow");
-
-      d = TREE_REAL_CST (node);
-      if (REAL_VALUE_ISINF (d))
-	fprintf (file,  REAL_VALUE_NEGATIVE (d) ? " -Inf" : " Inf");
-      else if (REAL_VALUE_ISNAN (d))
-	fprintf (file, " Nan");
-      else
-	{
-	  char string[60];
-	  real_to_decimal (string, &d, sizeof (string), 0, 1);
-	  fprintf (file, " %s", string);
-	}
-    }
+    print_real_cst (file, node, true);
   if (TREE_CODE (node) == FIXED_CST)
     {
       FIXED_VALUE_TYPE f;
@@ -377,7 +425,9 @@ print_node (FILE *file, const char *prefix, tree node, int indent,
 	fputs (" function-specific-opt", file);
       if (code == FUNCTION_DECL && DECL_DECLARED_INLINE_P (node))
 	fputs (" autoinline", file);
-      if (code == FUNCTION_DECL && DECL_BUILT_IN (node))
+      if (code == FUNCTION_DECL && DECL_UNINLINABLE (node))
+	fputs (" uninlinable", file);
+      if (code == FUNCTION_DECL && fndecl_built_in_p (node))
 	fputs (" built-in", file);
       if (code == FUNCTION_DECL && DECL_STATIC_CHAIN (node))
 	fputs (" static-chain", file);
@@ -452,7 +502,7 @@ print_node (FILE *file, const char *prefix, tree node, int indent,
 	  print_node (file, "size", DECL_SIZE (node), indent + 4);
 	  print_node (file, "unit-size", DECL_SIZE_UNIT (node), indent + 4);
 
-	  if (code != FUNCTION_DECL || DECL_BUILT_IN (node))
+	  if (code != FUNCTION_DECL || fndecl_built_in_p (node))
 	    indent_to (file, indent + 3);
 
 	  if (DECL_USER_ALIGN (node))
@@ -464,7 +514,7 @@ print_node (FILE *file, const char *prefix, tree node, int indent,
 	    fprintf (file, " offset_align " HOST_WIDE_INT_PRINT_UNSIGNED,
 		     DECL_OFFSET_ALIGN (node));
 
-	  if (code == FUNCTION_DECL && DECL_BUILT_IN (node))
+	  if (code == FUNCTION_DECL && fndecl_built_in_p (node))
 	    {
 	      if (DECL_BUILT_IN_CLASS (node) == BUILT_IN_MD)
 		fprintf (file, " built-in: BUILT_IN_MD:%d", DECL_FUNCTION_CODE (node));
@@ -630,7 +680,10 @@ print_node (FILE *file, const char *prefix, tree node, int indent,
       else if (code == ARRAY_TYPE)
 	print_node (file, "domain", TYPE_DOMAIN (node), indent + 4);
       else if (code == VECTOR_TYPE)
-	fprintf (file, " nunits:%d", (int) TYPE_VECTOR_SUBPARTS (node));
+	{
+	  fprintf (file, " nunits:");
+	  print_dec (TYPE_VECTOR_SUBPARTS (node), file);
+	}
       else if (code == RECORD_TYPE
 	       || code == UNION_TYPE
 	       || code == QUAL_UNION_TYPE)
@@ -721,28 +774,11 @@ print_node (FILE *file, const char *prefix, tree node, int indent,
 	    fprintf (file, " overflow");
 
 	  fprintf (file, " ");
-	  print_dec (node, file, TYPE_SIGN (TREE_TYPE (node)));
+	  print_dec (wi::to_wide (node), file, TYPE_SIGN (TREE_TYPE (node)));
 	  break;
 
 	case REAL_CST:
-	  {
-	    REAL_VALUE_TYPE d;
-
-	    if (TREE_OVERFLOW (node))
-	      fprintf (file, " overflow");
-
-	    d = TREE_REAL_CST (node);
-	    if (REAL_VALUE_ISINF (d))
-	      fprintf (file,  REAL_VALUE_NEGATIVE (d) ? " -Inf" : " Inf");
-	    else if (REAL_VALUE_ISNAN (d))
-	      fprintf (file, " Nan");
-	    else
-	      {
-		char string[64];
-		real_to_decimal (string, &d, sizeof (string), 0, 1);
-		fprintf (file, " %s", string);
-	      }
-	  }
+	  print_real_cst (file, node, false);
 	  break;
 
 	case FIXED_CST:
@@ -761,24 +797,18 @@ print_node (FILE *file, const char *prefix, tree node, int indent,
 
 	case VECTOR_CST:
 	  {
-	    /* Big enough for 2 UINT_MAX plus the string below.  */
+	    /* Big enough for UINT_MAX plus the string below.  */
 	    char buf[32];
-	    unsigned i;
 
-	    for (i = 0; i < VECTOR_CST_NELTS (node); ++i)
+	    fprintf (file, " npatterns:%u nelts-per-pattern:%u",
+		     VECTOR_CST_NPATTERNS (node),
+		     VECTOR_CST_NELTS_PER_PATTERN (node));
+	    unsigned int count = vector_cst_encoded_nelts (node);
+	    for (unsigned int i = 0; i < count; ++i)
 	      {
-		unsigned j;
-		/* Coalesce the output of identical consecutive elements.  */
-		for (j = i + 1; j < VECTOR_CST_NELTS (node); j++)
-		  if (VECTOR_CST_ELT (node, j) != VECTOR_CST_ELT (node, i))
-		    break;
-		j--;
-		if (i == j)
-		  sprintf (buf, "elt:%u: ", i);
-		else
-		  sprintf (buf, "elt:%u...%u: ", i, j);
-		print_node (file, buf, VECTOR_CST_ELT (node, i), indent + 4);
-		i = j;
+		sprintf (buf, "elt:%u: ", i);
+		print_node (file, buf, VECTOR_CST_ENCODED_ELT (node, i),
+			    indent + 4);
 	      }
 	  }
 	  break;
@@ -802,6 +832,18 @@ print_node (FILE *file, const char *prefix, tree node, int indent,
 		  fprintf (file, "\\%03o", ch & 0xFF);
 	      }
 	    fputc ('\"', file);
+	  }
+	  break;
+
+	case POLY_INT_CST:
+	  {
+	    char buf[10];
+	    for (unsigned int i = 0; i < NUM_POLY_INT_COEFFS; ++i)
+	      {
+		snprintf (buf, sizeof (buf), "elt%u: ", i);
+		print_node (file, buf, POLY_INT_CST_COEFF (node, i),
+			    indent + 4);
+	      }
 	  }
 	  break;
 
@@ -883,7 +925,8 @@ print_node (FILE *file, const char *prefix, tree node, int indent,
 	  {
 	    pretty_printer buffer;
 	    buffer.buffer->stream = file;
-	    pp_gimple_stmt_1 (&buffer, SSA_NAME_DEF_STMT (node), indent + 4, 0);
+	    pp_gimple_stmt_1 (&buffer, SSA_NAME_DEF_STMT (node), indent + 4,
+			      TDF_NONE);
 	    pp_flush (&buffer);
 	  }
 
@@ -1028,7 +1071,7 @@ dump_tree_via_hooks (const tree_node *ptr, dump_flags_t options)
 DEBUG_FUNCTION void
 debug (const tree_node &ref)
 {
-  dump_tree_via_hooks (&ref, 0);
+  dump_tree_via_hooks (&ref, TDF_NONE);
 }
 
 DEBUG_FUNCTION void
@@ -1059,7 +1102,7 @@ DEBUG_FUNCTION void
 debug_body (const tree_node &ref)
 {
   if (TREE_CODE (&ref) == FUNCTION_DECL)
-    dump_function_to_file (const_cast <tree_node*> (&ref), stderr, 0);
+    dump_function_to_file (const_cast <tree_node*> (&ref), stderr, TDF_NONE);
   else
     debug (ref);
 }
@@ -1095,32 +1138,6 @@ debug_raw (vec<tree, va_gc> &ref)
 }
 
 DEBUG_FUNCTION void
-debug (vec<tree, va_gc> &ref)
-{
-  tree elt;
-  unsigned ix;
-
-  /* Print the slot this node is in, and its code, and address.  */
-  fprintf (stderr, "<VEC");
-  dump_addr (stderr, " ", ref.address ());
-
-  FOR_EACH_VEC_ELT (ref, ix, elt)
-    {
-      fprintf (stderr, "elt:%d ", ix);
-      debug (elt);
-    }
-}
-
-DEBUG_FUNCTION void
-debug (vec<tree, va_gc> *ptr)
-{
-  if (ptr)
-    debug (*ptr);
-  else
-    fprintf (stderr, "<nil>\n");
-}
-
-DEBUG_FUNCTION void
 debug_raw (vec<tree, va_gc> *ptr)
 {
   if (ptr)
@@ -1129,8 +1146,11 @@ debug_raw (vec<tree, va_gc> *ptr)
     fprintf (stderr, "<nil>\n");
 }
 
-DEBUG_FUNCTION void
-debug_vec_tree (vec<tree, va_gc> *vec)
+static void
+debug_slim (tree t)
 {
-  debug_raw (vec);
+  print_node_brief (stderr, "", t, 0);
 }
+
+DEFINE_DEBUG_VEC (tree)
+DEFINE_DEBUG_HASH_SET (tree)

@@ -382,7 +382,7 @@ func (check *Checker) updateExprType(x ast.Expr, typ Type, final bool) {
 		// The respective sub-expressions got their final types
 		// upon assignment or use.
 		if debug {
-			check.dump("%s: found old type(%s): %s (new: %s)", x.Pos(), x, old.typ, typ)
+			check.dump("%v: found old type(%s): %s (new: %s)", x.Pos(), x, old.typ, typ)
 			unreachable()
 		}
 		return
@@ -402,9 +402,10 @@ func (check *Checker) updateExprType(x ast.Expr, typ Type, final bool) {
 
 	case *ast.UnaryExpr:
 		// If x is a constant, the operands were constants.
-		// They don't need to be updated since they never
-		// get "materialized" into a typed value; and they
-		// will be processed at the end of the type check.
+		// The operands don't need to be updated since they
+		// never get "materialized" into a typed value. If
+		// left in the untyped map, they will be processed
+		// at the end of the type check.
 		if old.val != nil {
 			break
 		}
@@ -443,12 +444,21 @@ func (check *Checker) updateExprType(x ast.Expr, typ Type, final bool) {
 	// Remove it from the map of yet untyped expressions.
 	delete(check.untyped, x)
 
-	// If x is the lhs of a shift, its final type must be integer.
-	// We already know from the shift check that it is representable
-	// as an integer if it is a constant.
-	if old.isLhs && !isInteger(typ) {
-		check.invalidOp(x.Pos(), "shifted operand %s (type %s) must be integer", x, typ)
-		return
+	if old.isLhs {
+		// If x is the lhs of a shift, its final type must be integer.
+		// We already know from the shift check that it is representable
+		// as an integer if it is a constant.
+		if !isInteger(typ) {
+			check.invalidOp(x.Pos(), "shifted operand %s (type %s) must be integer", x, typ)
+			return
+		}
+	} else if old.val != nil {
+		// If x is a constant, it must be representable as a value of typ.
+		c := operand{old.mode, x, old.typ, old.val, 0}
+		check.convertUntyped(&c, typ)
+		if c.mode == invalid {
+			return
+		}
 	}
 
 	// Everything's fine, record final type and value for x.
@@ -1020,7 +1030,15 @@ func (check *Checker) exprInternal(x *operand, e ast.Expr, hint Type) exprKind {
 			// Anonymous functions are considered part of the
 			// init expression/func declaration which contains
 			// them: use existing package-level declaration info.
-			check.funcBody(check.decl, "", sig, e.Body)
+			decl := check.decl // capture for use in closure below
+			iota := check.iota // capture for use in closure below (#22345)
+			// Don't type-check right away because the function may
+			// be part of a type definition to which the function
+			// body refers. Instead, type-check as soon as possible,
+			// but before the enclosing scope contents changes (#22992).
+			check.later(func() {
+				check.funcBody(decl, "<function literal>", sig, e.Body, iota)
+			})
 			x.mode = value
 			x.typ = sig
 		} else {
@@ -1046,7 +1064,7 @@ func (check *Checker) exprInternal(x *operand, e ast.Expr, hint Type) exprKind {
 					break
 				}
 			}
-			typ = check.typ(e.Type)
+			typ = check.typExpr(e.Type, nil, nil)
 			base = typ
 
 		case hint != nil:
@@ -1076,6 +1094,9 @@ func (check *Checker) exprInternal(x *operand, e ast.Expr, hint Type) exprKind {
 						continue
 					}
 					key, _ := kv.Key.(*ast.Ident)
+					// do all possible checks early (before exiting due to errors)
+					// so we don't drop information on the floor
+					check.expr(x, kv.Value)
 					if key == nil {
 						check.errorf(kv.Pos(), "invalid field name %s in struct literal", kv.Key)
 						continue
@@ -1087,15 +1108,14 @@ func (check *Checker) exprInternal(x *operand, e ast.Expr, hint Type) exprKind {
 					}
 					fld := fields[i]
 					check.recordUse(key, fld)
+					etyp := fld.typ
+					check.assignment(x, etyp, "struct literal")
 					// 0 <= i < len(fields)
 					if visited[i] {
 						check.errorf(kv.Pos(), "duplicate field name %s in struct literal", key.Name)
 						continue
 					}
 					visited[i] = true
-					check.expr(x, kv.Value)
-					etyp := fld.typ
-					check.assignment(x, etyp, "struct literal")
 				}
 			} else {
 				// no element must have a key
@@ -1175,17 +1195,18 @@ func (check *Checker) exprInternal(x *operand, e ast.Expr, hint Type) exprKind {
 				if x.mode == constant_ {
 					duplicate := false
 					// if the key is of interface type, the type is also significant when checking for duplicates
+					xkey := keyVal(x.val)
 					if _, ok := utyp.key.Underlying().(*Interface); ok {
-						for _, vtyp := range visited[x.val] {
+						for _, vtyp := range visited[xkey] {
 							if Identical(vtyp, x.typ) {
 								duplicate = true
 								break
 							}
 						}
-						visited[x.val] = append(visited[x.val], x.typ)
+						visited[xkey] = append(visited[xkey], x.typ)
 					} else {
-						_, duplicate = visited[x.val]
-						visited[x.val] = nil
+						_, duplicate = visited[xkey]
+						visited[xkey] = nil
 					}
 					if duplicate {
 						check.errorf(x.pos(), "duplicate key %s in map literal", x.val)
@@ -1412,7 +1433,7 @@ func (check *Checker) exprInternal(x *operand, e ast.Expr, hint Type) exprKind {
 			check.invalidAST(e.Pos(), "use of .(type) outside type switch")
 			goto Error
 		}
-		T := check.typ(e.Type)
+		T := check.typExpr(e.Type, nil, nil)
 		if T == Typ[Invalid] {
 			goto Error
 		}
@@ -1487,6 +1508,30 @@ Error:
 	x.mode = invalid
 	x.expr = e
 	return statement // avoid follow-up errors
+}
+
+func keyVal(x constant.Value) interface{} {
+	switch x.Kind() {
+	case constant.Bool:
+		return constant.BoolVal(x)
+	case constant.String:
+		return constant.StringVal(x)
+	case constant.Int:
+		if v, ok := constant.Int64Val(x); ok {
+			return v
+		}
+		if v, ok := constant.Uint64Val(x); ok {
+			return v
+		}
+	case constant.Float:
+		v, _ := constant.Float64Val(x)
+		return v
+	case constant.Complex:
+		r, _ := constant.Float64Val(constant.Real(x))
+		i, _ := constant.Float64Val(constant.Imag(x))
+		return complex(r, i)
+	}
+	return x
 }
 
 // typeAssertion checks that x.(T) is legal; xtyp must be the type of x.

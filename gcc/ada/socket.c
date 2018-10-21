@@ -6,7 +6,7 @@
  *                                                                          *
  *                          C Implementation File                           *
  *                                                                          *
- *          Copyright (C) 2003-2015, Free Software Foundation, Inc.         *
+ *          Copyright (C) 2003-2018, Free Software Foundation, Inc.         *
  *                                                                          *
  * GNAT is free software;  you can  redistribute it  and/or modify it under *
  * terms of the  GNU General Public License as published  by the Free Soft- *
@@ -30,6 +30,8 @@
  ****************************************************************************/
 
 /*  This file provides a portable binding to the sockets API                */
+
+#define ATTRIBUTE_UNUSED __attribute__((unused))
 
 /* Ensure access to errno is thread safe.  */
 #define _REENTRANT
@@ -95,7 +97,7 @@ extern int  __gnat_inet_pton (int, const char *, void *);
 /* Disable the sending of SIGPIPE for writes on a broken stream */
 
 void
-__gnat_disable_sigpipe (int fd)
+__gnat_disable_sigpipe (int fd ATTRIBUTE_UNUSED)
 {
 #ifdef SO_NOSIGPIPE
   int val = 1;

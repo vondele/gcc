@@ -1,5 +1,5 @@
 /* Common VxWorks target definitions for GNU compiler.
-   Copyright (C) 2007-2017 Free Software Foundation, Inc.
+   Copyright (C) 2007-2018 Free Software Foundation, Inc.
    Contributed by CodeSourcery, Inc.
 
 This file is part of GCC.
@@ -28,6 +28,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "output.h"
 #include "fold-const.h"
 
+#if !HAVE_INITFINI_ARRAY_SUPPORT
 /* Like default_named_section_asm_out_constructor, except that even
    constructors with DEFAULT_INIT_PRIORITY must go in a numbered
    section on VxWorks.  The VxWorks runtime uses a clever trick to get
@@ -56,6 +57,7 @@ vxworks_asm_out_destructor (rtx symbol, int priority)
 				    /*constructor_p=*/false);
   assemble_addr_to_section (symbol, sec);
 }
+#endif
 
 /* Return the list of FIELD_DECLs that make up an emulated TLS
    variable's control object.  TYPE is the structure these are fields
@@ -143,18 +145,23 @@ vxworks_override_options (void)
       targetm.emutls.debug_form_tls_address = true;
     }
 
-  /* We can use .ctors/.dtors sections only in RTP mode.  */
-  targetm.have_ctors_dtors = TARGET_VXWORKS_RTP;
+  /* We can use .ctors/.dtors sections only in RTP mode.  But, if the
+     compiler was built with --enable-initfini-array, assume the
+     toolchain implements the proper glue to make .init_array and
+     .fini_array work.  */
+  targetm.have_ctors_dtors = TARGET_VXWORKS_RTP || HAVE_INITFINI_ARRAY_SUPPORT;
 
   /* PIC is only supported for RTPs.  */
   if (flag_pic && !TARGET_VXWORKS_RTP)
     error ("PIC is only supported for RTPs");
 
-  /* Default to strict dwarf-2 to prevent potential difficulties observed with
-     non-gdb debuggers on extensions > 2.  */
+  /* VxWorks comes with non-gdb debuggers which only support strict
+     dwarf up to certain version.  Default dwarf control to friendly
+     values for these.  */
+
   if (!global_options_set.x_dwarf_strict)
     dwarf_strict = 1;
 
   if (!global_options_set.x_dwarf_version)
-    dwarf_version = 2;
+    dwarf_version = VXWORKS_DWARF_VERSION_DEFAULT;
 }

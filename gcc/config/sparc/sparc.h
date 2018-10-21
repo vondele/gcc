@@ -1,5 +1,5 @@
 /* Definitions of target machine for GNU compiler, for Sun SPARC.
-   Copyright (C) 1987-2017 Free Software Foundation, Inc.
+   Copyright (C) 1987-2018 Free Software Foundation, Inc.
    Contributed by Michael Tiemann (tiemann@cygnus.com).
    64-bit SPARC-V9 support by Michael Tiemann, Jim Wilson, and Doug Evans,
    at Cygnus Support.
@@ -420,7 +420,7 @@ extern enum cmodel sparc_cmodel;
 
 /* Because libgcc can generate references back to libc (via .umul etc.) we have
    to list libc again after the second libgcc.  */
-#define LINK_GCC_C_SEQUENCE_SPEC "%G %L %G %L"
+#define LINK_GCC_C_SEQUENCE_SPEC "%G %{!nolibc:%L} %G %{!nolibc:%L}"
 
 
 #define PTRDIFF_TYPE (TARGET_ARCH64 ? "long int" : "int")
@@ -578,12 +578,6 @@ extern enum cmodel sparc_cmodel;
    of the function containing a non-local goto target.  */
 #define STACK_SAVEAREA_MODE(LEVEL) \
   ((LEVEL) == SAVE_NONLOCAL ? (TARGET_ARCH64 ? TImode : DImode) : Pmode)
-
-/* Make strings word-aligned so strcpy from constants will be faster.  */
-#define CONSTANT_ALIGNMENT(EXP, ALIGN)  \
-  ((TREE_CODE (EXP) == STRING_CST	\
-    && (ALIGN) < FASTEST_ALIGNMENT)	\
-   ? FASTEST_ALIGNMENT : (ALIGN))
 
 /* Make arrays of chars word-aligned for the same reasons.  */
 #define DATA_ALIGNMENT(TYPE, ALIGN)		\
@@ -777,13 +771,29 @@ extern enum cmodel sparc_cmodel;
 /* The soft frame pointer does not have the stack bias applied.  */
 #define FRAME_POINTER_REGNUM 101
 
-/* Given the stack bias, the stack pointer isn't actually aligned.  */
 #define INIT_EXPANDERS							 \
   do {									 \
-    if (crtl->emit.regno_pointer_align && SPARC_STACK_BIAS)	 \
+    if (crtl->emit.regno_pointer_align)					 \
       {									 \
-	REGNO_POINTER_ALIGN (STACK_POINTER_REGNUM) = BITS_PER_UNIT;	 \
-	REGNO_POINTER_ALIGN (HARD_FRAME_POINTER_REGNUM) = BITS_PER_UNIT; \
+	/* The biased stack pointer is only aligned on BITS_PER_UNIT.  */\
+	if (SPARC_STACK_BIAS)						 \
+	  {								 \
+	    REGNO_POINTER_ALIGN (STACK_POINTER_REGNUM)			 \
+	      = BITS_PER_UNIT;	 					 \
+	    REGNO_POINTER_ALIGN (HARD_FRAME_POINTER_REGNUM)		 \
+	      = BITS_PER_UNIT;						 \
+	  }								 \
+									 \
+	/* In 32-bit mode, not everything is double-word aligned.  */	 \
+	if (TARGET_ARCH32)						 \
+	  {								 \
+	    REGNO_POINTER_ALIGN (VIRTUAL_INCOMING_ARGS_REGNUM)		 \
+	      = BITS_PER_WORD;						 \
+	    REGNO_POINTER_ALIGN (VIRTUAL_STACK_DYNAMIC_REGNUM)		 \
+	      = BITS_PER_WORD;						 \
+	    REGNO_POINTER_ALIGN (VIRTUAL_OUTGOING_ARGS_REGNUM)		 \
+	      = BITS_PER_WORD;						 \
+	  }								 \
       }									 \
   } while (0)
 
@@ -798,11 +808,14 @@ extern enum cmodel sparc_cmodel;
 
 #define GLOBAL_OFFSET_TABLE_REGNUM 23
 
-/* Register which holds offset table for position-independent
-   data references.  */
+/* Register which holds offset table for position-independent data references.
+   The original SPARC ABI imposes no requirement on the choice of the register
+   so we use a pseudo-register to make sure it is properly saved and restored
+   around calls to setjmp.  Now the ABI of VxWorks RTP makes it live on entry
+   to PLT entries so we use the canonical GOT register in this case.  */
 
 #define PIC_OFFSET_TABLE_REGNUM \
-  (flag_pic ? GLOBAL_OFFSET_TABLE_REGNUM : INVALID_REGNUM)
+  (TARGET_VXWORKS_RTP && flag_pic ? GLOBAL_OFFSET_TABLE_REGNUM : INVALID_REGNUM)
 
 /* Pick a default value we can notice from override_options:
    !v9: Default is on.
@@ -1048,12 +1061,6 @@ extern char leaf_reg_remap[];
    that is, each additional local variable allocated
    goes at a more negative offset in the frame.  */
 #define FRAME_GROWS_DOWNWARD 1
-
-/* Offset within stack frame to start allocating local variables at.
-   If FRAME_GROWS_DOWNWARD, this is the offset to the END of the
-   first local allocated.  Otherwise, it is the offset to the BEGINNING
-   of the first local allocated.  */
-#define STARTING_FRAME_OFFSET 0
 
 /* Offset of first parameter from the argument pointer register value.
    !v9: This is 64 for the ins and locals, plus 4 for the struct-return reg
@@ -1489,41 +1496,10 @@ do {									   \
 #define DITF_CONVERSION_LIBFUNCS	0
 #define SUN_INTEGER_MULTIPLY_64 	0
 
-/* Provide the cost of a branch.  For pre-v9 processors we use
-   a value of 3 to take into account the potential annulling of
-   the delay slot (which ends up being a bubble in the pipeline slot)
-   plus a cycle to take into consideration the instruction cache
-   effects.
-
-   On v9 and later, which have branch prediction facilities, we set
-   it to the depth of the pipeline as that is the cost of a
-   mispredicted branch.
-
-   On Niagara, normal branches insert 3 bubbles into the pipe
-   and annulled branches insert 4 bubbles.
-
-   On Niagara-2 and Niagara-3, a not-taken branch costs 1 cycle whereas
-   a taken branch costs 6 cycles.
-
-   The T4 Supplement specifies the branch latency at 2 cycles.
-   The M7 Supplement specifies the branch latency at 1 cycle. */
-
-#define BRANCH_COST(speed_p, predictable_p) \
-	((sparc_cpu == PROCESSOR_V9 \
-	  || sparc_cpu == PROCESSOR_ULTRASPARC) \
-	 ? 7 \
-         : (sparc_cpu == PROCESSOR_ULTRASPARC3 \
-            ? 9 \
-	 : (sparc_cpu == PROCESSOR_NIAGARA \
-	    ? 4 \
-	 : ((sparc_cpu == PROCESSOR_NIAGARA2 \
-	     || sparc_cpu == PROCESSOR_NIAGARA3) \
-	    ? 5 \
-	 : (sparc_cpu == PROCESSOR_NIAGARA4 \
-	    ? 2 \
-	 : (sparc_cpu == PROCESSOR_NIAGARA7 \
-	    ? 1 \
-	 : 3))))))
+/* A C expression for the cost of a branch instruction.  A value of 1
+   is the default; other values are interpreted relative to that.  */
+#define BRANCH_COST(SPEED_P, PREDICTABLE_P) \
+  (sparc_branch_cost (SPEED_P, PREDICTABLE_P))
 
 /* Control the assembler format that we output.  */
 
@@ -1652,7 +1628,7 @@ do {									\
 
 #define ASM_OUTPUT_ALIGN(FILE,LOG)	\
   if ((LOG) != 0)			\
-    fprintf (FILE, "\t.align %d\n", (1<<(LOG)))
+    fprintf (FILE, "\t.align %d\n", (1 << (LOG)))
 
 #define ASM_OUTPUT_SKIP(FILE,SIZE)  \
   fprintf (FILE, "\t.skip " HOST_WIDE_INT_PRINT_UNSIGNED"\n", (SIZE))

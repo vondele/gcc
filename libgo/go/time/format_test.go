@@ -429,6 +429,8 @@ var parseTimeZoneTests = []ParseTimeZoneTest{
 	{"ESASTT hi", 0, false}, // run of upper-case letters too long.
 	{"ESATY hi", 0, false},  // five letters must end in T.
 	{"WITA hi", 4, true},    // Issue #18251
+	{"+03 hi", 3, true},     // Issue #24071
+	{"-04 hi", 3, true},     // Issue #24071
 }
 
 func TestParseTimeZone(t *testing.T) {
@@ -467,6 +469,9 @@ var parseErrorTests = []ParseErrorTest{
 	{RFC3339, "2006-01-02T15:04:05Z_abc", `parsing time "2006-01-02T15:04:05Z_abc": extra text: _abc`},
 	// invalid second followed by optional fractional seconds
 	{RFC3339, "2010-02-04T21:00:67.012345678-08:00", "second out of range"},
+	// issue 21113
+	{"_2 Jan 06 15:04 MST", "4 --- 00 00:00 GMT", "cannot parse"},
+	{"_2 January 06 15:04 MST", "4 --- 00 00:00 GMT", "cannot parse"},
 }
 
 func TestParseErrors(t *testing.T) {

@@ -21,7 +21,6 @@ import (
 //var Fcmp64 = fcmp64
 //var Fintto64 = fintto64
 //var F64toint = f64toint
-//var Sqrt = sqrt
 
 var Entersyscall = entersyscall
 var Exitsyscall = exitsyscall
@@ -123,15 +122,15 @@ func RunSchedLocalQueueEmptyTest(iters int) {
 	// can lead to underutilization (both runnable Gs and idle Ps coexist
 	// for arbitrary long time).
 	done := make(chan bool, 1)
-	p := new(p)
+	_p_ := new(p)
 	gs := make([]g, 2)
 	ready := new(uint32)
 	for i := 0; i < iters; i++ {
 		*ready = 0
 		next0 := (i & 1) == 0
 		next1 := (i & 2) == 0
-		runqput(p, &gs[0], next0)
-		go func() {
+		runqput(_p_, &gs[0], next0)
+		go func(done chan bool, p *p, ready *uint32, next0, next1 bool) {
 			for atomic.Xadd(ready, 1); atomic.Load(ready) != 2; {
 			}
 			if runqempty(p) {
@@ -139,22 +138,29 @@ func RunSchedLocalQueueEmptyTest(iters int) {
 				throw("queue is empty")
 			}
 			done <- true
-		}()
+		}(done, _p_, ready, next0, next1)
 		for atomic.Xadd(ready, 1); atomic.Load(ready) != 2; {
 		}
-		runqput(p, &gs[1], next1)
-		runqget(p)
+		runqput(_p_, &gs[1], next1)
+		runqget(_p_)
 		<-done
-		runqget(p)
+		runqget(_p_)
 	}
 }
 
-var StringHash = stringHash
-var BytesHash = bytesHash
-var Int32Hash = int32Hash
-var Int64Hash = int64Hash
-var EfaceHash = efaceHash
-var IfaceHash = ifaceHash
+var (
+	StringHash = stringHash
+	BytesHash  = bytesHash
+	Int32Hash  = int32Hash
+	Int64Hash  = int64Hash
+	MemHash    = memhash
+	MemHash32  = memhash32
+	MemHash64  = memhash64
+	EfaceHash  = efaceHash
+	IfaceHash  = ifaceHash
+)
+
+var UseAeshash = &useAeshash
 
 func MemclrBytes(b []byte) {
 	s := (*slice)(unsafe.Pointer(&b))
@@ -363,4 +369,88 @@ func (rw *RWMutex) Lock() {
 
 func (rw *RWMutex) Unlock() {
 	rw.rw.unlock()
+}
+
+const RuntimeHmapSize = unsafe.Sizeof(hmap{})
+
+func MapBucketsCount(m map[int]int) int {
+	h := *(**hmap)(unsafe.Pointer(&m))
+	return 1 << h.B
+}
+
+func MapBucketsPointerIsNil(m map[int]int) bool {
+	h := *(**hmap)(unsafe.Pointer(&m))
+	return h.buckets == nil
+}
+
+func LockOSCounts() (external, internal uint32) {
+	g := getg()
+	if g.m.lockedExt+g.m.lockedInt == 0 {
+		if g.lockedm != 0 {
+			panic("lockedm on non-locked goroutine")
+		}
+	} else {
+		if g.lockedm == 0 {
+			panic("nil lockedm on locked goroutine")
+		}
+	}
+	return g.m.lockedExt, g.m.lockedInt
+}
+
+func KeepNArenaHints(n int) {
+	hint := mheap_.arenaHints
+	for i := 1; i < n; i++ {
+		hint = hint.next
+		if hint == nil {
+			return
+		}
+	}
+	hint.next = nil
+}
+
+// MapNextArenaHint reserves a page at the next arena growth hint,
+// preventing the arena from growing there, and returns the range of
+// addresses that are no longer viable.
+func MapNextArenaHint() (start, end uintptr) {
+	hint := mheap_.arenaHints
+	addr := hint.addr
+	if hint.down {
+		start, end = addr-heapArenaBytes, addr
+		addr -= physPageSize
+	} else {
+		start, end = addr, addr+heapArenaBytes
+	}
+	sysReserve(unsafe.Pointer(addr), physPageSize)
+	return
+}
+
+func GetNextArenaHint() uintptr {
+	return mheap_.arenaHints.addr
+}
+
+type G = g
+
+func Getg() *G {
+	return getg()
+}
+
+//go:noinline
+func PanicForTesting(b []byte, i int) byte {
+	return unexportedPanicForTesting(b, i)
+}
+
+//go:noinline
+func unexportedPanicForTesting(b []byte, i int) byte {
+	return b[i]
+}
+
+func G0StackOverflow() {
+	systemstack(func() {
+		stackOverflow(nil)
+	})
+}
+
+func stackOverflow(x *byte) {
+	var buf [256]byte
+	stackOverflow(&buf[0])
 }

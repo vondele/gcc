@@ -1,6 +1,6 @@
 /* Gimple IR support functions.
 
-   Copyright (C) 2007-2017 Free Software Foundation, Inc.
+   Copyright (C) 2007-2018 Free Software Foundation, Inc.
    Contributed by Aldy Hernandez <aldyh@redhat.com>
 
 This file is part of GCC.
@@ -77,8 +77,8 @@ EXPORTED_CONST enum gimple_statement_structure_enum gss_for_code_[] = {
 
 /* Gimple stats.  */
 
-int gimple_alloc_counts[(int) gimple_alloc_kind_all];
-int gimple_alloc_sizes[(int) gimple_alloc_kind_all];
+uint64_t gimple_alloc_counts[(int) gimple_alloc_kind_all];
+uint64_t gimple_alloc_sizes[(int) gimple_alloc_kind_all];
 
 /* Keep in sync with gimple.h:enum gimple_alloc_kind.  */
 static const char * const gimple_alloc_kind_names[] = {
@@ -346,21 +346,29 @@ gimple_build_call_internal_vec (enum internal_fn fn, vec<tree> args)
    this fact.  */
 
 gcall *
-gimple_build_call_from_tree (tree t)
+gimple_build_call_from_tree (tree t, tree fnptrtype)
 {
   unsigned i, nargs;
   gcall *call;
-  tree fndecl = get_callee_fndecl (t);
 
   gcc_assert (TREE_CODE (t) == CALL_EXPR);
 
   nargs = call_expr_nargs (t);
-  call = gimple_build_call_1 (fndecl ? fndecl : CALL_EXPR_FN (t), nargs);
+
+  tree fndecl = NULL_TREE;
+  if (CALL_EXPR_FN (t) == NULL_TREE)
+    call = gimple_build_call_internal_1 (CALL_EXPR_IFN (t), nargs);
+  else
+    {
+      fndecl = get_callee_fndecl (t);
+      call = gimple_build_call_1 (fndecl ? fndecl : CALL_EXPR_FN (t), nargs);
+    }
 
   for (i = 0; i < nargs; i++)
     gimple_call_set_arg (call, i, CALL_EXPR_ARG (t, i));
 
   gimple_set_block (call, TREE_BLOCK (t));
+  gimple_set_location (call, EXPR_LOCATION (t));
 
   /* Carry all the CALL_EXPR flags to the new GIMPLE_CALL.  */
   gimple_call_set_chain (call, CALL_EXPR_STATIC_CHAIN (t));
@@ -368,9 +376,8 @@ gimple_build_call_from_tree (tree t)
   gimple_call_set_must_tail (call, CALL_EXPR_MUST_TAIL_CALL (t));
   gimple_call_set_return_slot_opt (call, CALL_EXPR_RETURN_SLOT_OPT (t));
   if (fndecl
-      && DECL_BUILT_IN_CLASS (fndecl) == BUILT_IN_NORMAL
-      && (DECL_FUNCTION_CODE (fndecl) == BUILT_IN_ALLOCA
-	  || DECL_FUNCTION_CODE (fndecl) == BUILT_IN_ALLOCA_WITH_ALIGN))
+      && fndecl_built_in_p (fndecl, BUILT_IN_NORMAL)
+      && ALLOCA_FUNCTION_CODE_P (DECL_FUNCTION_CODE (fndecl)))
     gimple_call_set_alloca_for_var (call, CALL_ALLOCA_FOR_VAR_P (t));
   else
     gimple_call_set_from_thunk (call, CALL_FROM_THUNK_P (t));
@@ -378,7 +385,23 @@ gimple_build_call_from_tree (tree t)
   gimple_call_set_nothrow (call, TREE_NOTHROW (t));
   gimple_call_set_by_descriptor (call, CALL_EXPR_BY_DESCRIPTOR (t));
   gimple_set_no_warning (call, TREE_NO_WARNING (t));
-  gimple_call_set_with_bounds (call, CALL_WITH_BOUNDS_P (t));
+
+  if (fnptrtype)
+    {
+      gimple_call_set_fntype (call, TREE_TYPE (fnptrtype));
+
+      /* Check if it's an indirect CALL and the type has the
+ 	 nocf_check attribute. In that case propagate the information
+	 to the gimple CALL insn.  */
+      if (!fndecl)
+	{
+	  gcc_assert (POINTER_TYPE_P (fnptrtype));
+	  tree fntype = TREE_TYPE (fnptrtype);
+
+	  if (lookup_attribute ("nocf_check", TYPE_ATTRIBUTES (fntype)))
+	    gimple_call_set_nocf_check (call, TRUE);
+	}
+    }
 
   return call;
 }
@@ -831,6 +854,48 @@ gimple_build_debug_source_bind (tree var, tree value,
   gimple_debug_source_bind_set_value (p, value);
   if (stmt)
     gimple_set_location (p, gimple_location (stmt));
+
+  return p;
+}
+
+
+/* Build a new GIMPLE_DEBUG_BEGIN_STMT statement in BLOCK at
+   LOCATION.  */
+
+gdebug *
+gimple_build_debug_begin_stmt (tree block, location_t location
+				    MEM_STAT_DECL)
+{
+  gdebug *p
+    = as_a <gdebug *> (
+        gimple_build_with_ops_stat (GIMPLE_DEBUG,
+				    (unsigned)GIMPLE_DEBUG_BEGIN_STMT, 0
+				    PASS_MEM_STAT));
+
+  gimple_set_location (p, location);
+  gimple_set_block (p, block);
+  cfun->debug_marker_count++;
+
+  return p;
+}
+
+
+/* Build a new GIMPLE_DEBUG_INLINE_ENTRY statement in BLOCK at
+   LOCATION.  The BLOCK links to the inlined function.  */
+
+gdebug *
+gimple_build_debug_inline_entry (tree block, location_t location
+				      MEM_STAT_DECL)
+{
+  gdebug *p
+    = as_a <gdebug *> (
+        gimple_build_with_ops_stat (GIMPLE_DEBUG,
+				    (unsigned)GIMPLE_DEBUG_INLINE_ENTRY, 0
+				    PASS_MEM_STAT));
+
+  gimple_set_location (p, location);
+  gimple_set_block (p, block);
+  cfun->debug_marker_count++;
 
   return p;
 }
@@ -1483,6 +1548,57 @@ gimple_call_return_flags (const gcall *stmt)
 }
 
 
+/* Return true if call STMT is known to return a non-zero result.  */
+
+bool
+gimple_call_nonnull_result_p (gcall *call)
+{
+  tree fndecl = gimple_call_fndecl (call);
+  if (!fndecl)
+    return false;
+  if (flag_delete_null_pointer_checks && !flag_check_new
+      && DECL_IS_OPERATOR_NEW (fndecl)
+      && !TREE_NOTHROW (fndecl))
+    return true;
+
+  /* References are always non-NULL.  */
+  if (flag_delete_null_pointer_checks
+      && TREE_CODE (TREE_TYPE (fndecl)) == REFERENCE_TYPE)
+    return true;
+
+  if (flag_delete_null_pointer_checks
+      && lookup_attribute ("returns_nonnull",
+			   TYPE_ATTRIBUTES (gimple_call_fntype (call))))
+    return true;
+  return gimple_alloca_call_p (call);
+}
+
+
+/* If CALL returns a non-null result in an argument, return that arg.  */
+
+tree
+gimple_call_nonnull_arg (gcall *call)
+{
+  tree fndecl = gimple_call_fndecl (call);
+  if (!fndecl)
+    return NULL_TREE;
+
+  unsigned rf = gimple_call_return_flags (call);
+  if (rf & ERF_RETURNS_ARG)
+    {
+      unsigned argnum = rf & ERF_RETURN_ARG_MASK;
+      if (argnum < gimple_call_num_args (call))
+	{
+	  tree arg = gimple_call_arg (call, argnum);
+	  if (SSA_VAR_P (arg)
+	      && infer_nonnull_range_by_attribute (call, arg))
+	    return arg;
+	}
+    }
+  return NULL_TREE;
+}
+
+
 /* Return true if GS is a copy assignment.  */
 
 bool
@@ -1824,11 +1940,35 @@ gimple_copy (gimple *stmt)
 	  gimple_omp_sections_set_clauses (copy, t);
 	  t = unshare_expr (gimple_omp_sections_control (stmt));
 	  gimple_omp_sections_set_control (copy, t);
-	  /* FALLTHRU  */
+	  goto copy_omp_body;
 
 	case GIMPLE_OMP_SINGLE:
+	  {
+	    gomp_single *omp_single_copy = as_a <gomp_single *> (copy);
+	    t = unshare_expr (gimple_omp_single_clauses (stmt));
+	    gimple_omp_single_set_clauses (omp_single_copy, t);
+	  }
+	  goto copy_omp_body;
+
 	case GIMPLE_OMP_TARGET:
+	  {
+	    gomp_target *omp_target_stmt = as_a <gomp_target *> (stmt);
+	    gomp_target *omp_target_copy = as_a <gomp_target *> (copy);
+	    t = unshare_expr (gimple_omp_target_clauses (omp_target_stmt));
+	    gimple_omp_target_set_clauses (omp_target_copy, t);
+	    t = unshare_expr (gimple_omp_target_data_arg (omp_target_stmt));
+	    gimple_omp_target_set_data_arg (omp_target_copy, t);
+	  }
+	  goto copy_omp_body;
+
 	case GIMPLE_OMP_TEAMS:
+	  {
+	    gomp_teams *omp_teams_copy = as_a <gomp_teams *> (copy);
+	    t = unshare_expr (gimple_omp_teams_clauses (stmt));
+	    gimple_omp_teams_set_clauses (omp_teams_copy, t);
+	  }
+	  /* FALLTHRU  */
+
 	case GIMPLE_OMP_SECTION:
 	case GIMPLE_OMP_MASTER:
 	case GIMPLE_OMP_TASKGROUP:
@@ -1873,6 +2013,9 @@ gimple_copy (gimple *stmt)
       /* SSA operands need to be updated.  */
       gimple_set_modified (copy, true);
     }
+
+  if (gimple_debug_nonbind_marker_p (stmt))
+    cfun->debug_marker_count++;
 
   return copy;
 }
@@ -1992,11 +2135,12 @@ gimple_assign_rhs_could_trap_p (gimple *s)
 void
 dump_gimple_statistics (void)
 {
-  int i, total_tuples = 0, total_bytes = 0;
+  int i;
+  uint64_t total_tuples = 0, total_bytes = 0;
 
   if (! GATHER_STATISTICS)
     {
-      fprintf (stderr, "No gimple statistics\n");
+      fprintf (stderr, "No GIMPLE statistics\n");
       return;
     }
 
@@ -2005,13 +2149,15 @@ dump_gimple_statistics (void)
   fprintf (stderr, "---------------------------------------\n");
   for (i = 0; i < (int) gimple_alloc_kind_all; ++i)
     {
-      fprintf (stderr, "%-20s %7d %10d\n", gimple_alloc_kind_names[i],
-	  gimple_alloc_counts[i], gimple_alloc_sizes[i]);
+      fprintf (stderr, "%-20s %7" PRIu64 " %10" PRIu64 "\n",
+	       gimple_alloc_kind_names[i], gimple_alloc_counts[i],
+	       gimple_alloc_sizes[i]);
       total_tuples += gimple_alloc_counts[i];
       total_bytes += gimple_alloc_sizes[i];
     }
   fprintf (stderr, "---------------------------------------\n");
-  fprintf (stderr, "%-20s %7d %10d\n", "Total", total_tuples, total_bytes);
+  fprintf (stderr, "%-20s %7" PRIu64 " %10" PRIu64 "\n", "Total",
+	   total_tuples, total_bytes);
   fprintf (stderr, "---------------------------------------\n");
 }
 
@@ -2054,8 +2200,7 @@ get_gimple_rhs_num_ops (enum tree_code code)
       || (SYM) == REALIGN_LOAD_EXPR					    \
       || (SYM) == VEC_COND_EXPR						    \
       || (SYM) == VEC_PERM_EXPR                                             \
-      || (SYM) == BIT_INSERT_EXPR					    \
-      || (SYM) == FMA_EXPR) ? GIMPLE_TERNARY_RHS			    \
+      || (SYM) == BIT_INSERT_EXPR) ? GIMPLE_TERNARY_RHS			    \
    : ((SYM) == CONSTRUCTOR						    \
       || (SYM) == OBJ_TYPE_REF						    \
       || (SYM) == ASSERT_EXPR						    \
@@ -2536,8 +2681,7 @@ gimple_call_builtin_p (const gimple *stmt, enum built_in_function code)
   tree fndecl;
   if (is_gimple_call (stmt)
       && (fndecl = gimple_call_fndecl (stmt)) != NULL_TREE
-      && DECL_BUILT_IN_CLASS (fndecl) == BUILT_IN_NORMAL 
-      && DECL_FUNCTION_CODE (fndecl) == code)
+      && fndecl_built_in_p (fndecl, code))
     return gimple_builtin_call_types_compatible_p (stmt, fndecl);
   return false;
 }
@@ -2556,7 +2700,7 @@ gimple_call_combined_fn (const gimple *stmt)
 
       tree fndecl = gimple_call_fndecl (stmt);
       if (fndecl
-	  && DECL_BUILT_IN_CLASS (fndecl) == BUILT_IN_NORMAL
+	  && fndecl_built_in_p (fndecl, BUILT_IN_NORMAL)
 	  && gimple_builtin_call_types_compatible_p (stmt, fndecl))
 	return as_combined_fn (DECL_FUNCTION_CODE (fndecl));
     }
@@ -2965,13 +3109,14 @@ preprocess_case_label_vec_for_gimple (vec<tree> labels,
 
 		  if (CASE_HIGH (labels[i]) != NULL_TREE
 		      && (CASE_HIGH (widest_label) == NULL_TREE
-			  || wi::gtu_p (wi::sub (CASE_HIGH (labels[i]),
-						 CASE_LOW (labels[i])),
-					wi::sub (CASE_HIGH (widest_label),
-						 CASE_LOW (widest_label)))))
+			  || (wi::gtu_p
+			      (wi::to_wide (CASE_HIGH (labels[i]))
+			       - wi::to_wide (CASE_LOW (labels[i])),
+			       wi::to_wide (CASE_HIGH (widest_label))
+			       - wi::to_wide (CASE_LOW (widest_label))))))
 		    widest_label = labels[i];
 
-		  if (wi::add (low, 1) != high)
+		  if (wi::to_wide (low) + 1 != wi::to_wide (high))
 		    break;
 		}
 	      if (i == len)
@@ -3058,7 +3203,7 @@ static void
 verify_gimple_pp (const char *expected, gimple *stmt)
 {
   pretty_printer pp;
-  pp_gimple_stmt_1 (&pp, stmt, 0 /* spc */, 0 /* flags */);
+  pp_gimple_stmt_1 (&pp, stmt, 0 /* spc */, TDF_NONE /* flags */);
   ASSERT_STREQ (expected, pp_formatted_text (&pp));
 }
 

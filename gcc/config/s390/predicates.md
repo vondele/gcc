@@ -1,5 +1,5 @@
 ;; Predicate definitions for S/390 and zSeries.
-;; Copyright (C) 2005-2017 Free Software Foundation, Inc.
+;; Copyright (C) 2005-2018 Free Software Foundation, Inc.
 ;; Contributed by Hartmut Penner (hpenner@de.ibm.com) and
 ;;                Ulrich Weigand (uweigand@de.ibm.com).
 ;;
@@ -65,6 +65,25 @@
     return false;
 
   return true;
+})
+
+;; Return true of the address of the mem operand plus 16 is still a
+;; valid Q constraint address.
+
+(define_predicate "plus16_Q_operand"
+  (and (match_code "mem")
+       (match_operand 0 "general_operand"))
+{
+  rtx addr = XEXP (op, 0);
+  if (REG_P (addr))
+    return true;
+
+  if (GET_CODE (addr) != PLUS
+      || !REG_P (XEXP (addr, 0))
+      || !CONST_INT_P (XEXP (addr, 1)))
+    return false;
+
+  return SHORT_DISP_IN_RANGE (INTVAL (XEXP (addr, 1)) + 16);
 })
 
 ;; Return true if OP is a valid operand for the BRAS instruction.
@@ -507,4 +526,23 @@
 	return false;
     }
   return true;
+})
+
+(define_predicate "const_shift_by_byte_operand"
+  (match_code "const_int")
+{
+  unsigned HOST_WIDE_INT val = INTVAL (op);
+  return val <= 128 && val % 8 == 0;
+})
+
+;; Certain operations (e.g. CS) cannot access SYMBOL_REF directly, it needs to
+;; be loaded into some register first.  In theory, if we put a SYMBOL_REF into
+;; a corresponding insn anyway, reload will generate a load for it, but, when
+;; coupled with constant propagation, this will lead to an inefficient code
+;; (see PR 80080).
+
+(define_predicate "nonsym_memory_operand"
+  (match_code "mem")
+{
+  return memory_operand (op, mode) && !contains_symbol_ref_p (op);
 })
